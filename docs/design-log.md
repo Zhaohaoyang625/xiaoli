@@ -417,3 +417,11 @@
 - **核心承诺验证（真模型推理）**：「怕高」vs「要去爬山」余弦 0.3398 > 无关句；端到端 recall 测试：「明天要去爬山」→ 命中「他怕高，不敢坐摩天轮」（零共同字符，纯语义）／「想喝点甜的饮料」→「他喜欢喝奶茶」／「我的工作地点在哪」→「他在台北工作」。**v2 记忆引擎的语义召回从今天起真正工作**。
 - **pytest.ini 新增**：testpaths=tests——scripts/ 下的 test_search.py 是真 API 实测脚本（会花钱），裸跑 `pytest` 会被误收集报 collection error，以后裸跑也只跑 tests/。
 - 启动自检第 7 项「语义记忆」[OK]；推理速度毫秒级（CPU），对主循环无感。
+
+## AO. 拟声提示可见化 + 最后两个测试盲区（2026-08-23，385 全绿）
+- **sfx 静默失败修复（同 bge 降级坑）**：清嗓/叹气/轻笑/咳嗽合成失败原来完全静默（连日志都没有）→ 一次性警告不刷屏 + 启动自检第 8 项「拟声素材」（只看 data/sfx/ 的 wav 文件在不在，不合成不花钱）。
+- **补最后两个测试盲区**（之前审计：18 模块 16 个有测试）：whisper_stt 10 项（开关门 STT_LOCAL=False 不加载/模型缺失提示/加载成功失败/并发 _loading 直接 False/识别异常 None 不崩/空文本 None/语言锁 zh/vad_filter 开/NVIDIA dll 路径注入）+ sfx 10 项（wav 缓存命中不合成/现场合成存盘/失败警告一次/未知名字当文本/损坏 wav 兜底合成/播放永不崩/异步线程）。
+- **两个 mock 大坑（本环境实测，值得记）**：
+  ① **patch 全局 os.path.isdir 期间 import 外部库 → 无限递归**：`mock.patch("xiaoli.whisper_stt.os.path.isdir")` 字符串路径解析 = patch **全局** os.path.isdir（whisper_stt 的 os 就是全局 os）。patch 生效期间 `_load()` 里 `from faster_whisper import WhisperModel` 触发 transformers 的目录结构探测（create_import_structure_from_path），isdir 全 True → 每层都当目录递归 → RecursionError。**解法：模块级预导入 faster_whisper（sys.modules 缓存后 from import 只取属性不重导）**。
+  ② **mock.patch 第二位置参数是 new 值**：`@mock.patch("...os.environ", {"PATH": ...})` 的 dict 被当成 new（替换值）不是 spec——patch 生效但**不注入位置参数** → 后面参数全错位（missing arg）。**要改环境变量用 `@mock.patch.dict("os.environ", {...})`**。
+- 声音链路实测：本地克隆声（Qwen3-TTS）工作正常（合成 OK，显存 4.2GB/峰值 4.6GB）——"音色终极解法=GPT-SoVITS"仍是 9-5/9-6 排期项，用户未拍板。
