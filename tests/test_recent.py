@@ -4,6 +4,7 @@
 # /send：网页打字聊天（文本进输入队列 → 她照常回应）
 # ============================================
 
+import contextlib
 import queue
 import unittest
 from unittest import mock
@@ -88,6 +89,43 @@ class TestRecentEndpoint(unittest.TestCase):
             {"role": "user", "content": f"m{i}", "time": "t"} for i in range(30)]
         resp = self._call(self._handler("/recent?n=abc&token=secret123"))
         self.assertEqual(len(resp["body"]["messages"]), 20)
+
+    def test_diary_none_ok(self):
+        """bridge 单独启动（diary 还没 load）不 500，返回空列表"""
+        chat_mod.diary = None
+        resp = self._call(self._handler())
+        self.assertEqual(resp["code"], 200)
+        self.assertEqual(resp["body"]["messages"], [])
+
+
+class TestListenRobustness(unittest.TestCase):
+    """/listen 识别异常不崩连接（返回 ok=False，网页提示"没听清"）"""
+
+    def _call(self, handler, stt_side_effect=None):
+        h = chat_mod.WebBridge.__new__(chat_mod.WebBridge)
+        h.path = handler
+        resp = {}
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.object(chat_mod, "_bridge_token", "secret123"))
+            st.enter_context(mock.patch.object(
+                chat_mod.WebBridge, "_json",
+                side_effect=lambda d, c=200: resp.update({"body": d, "code": c})))
+            if stt_side_effect is not None:
+                st.enter_context(mock.patch.object(chat_mod.stt, "listen_once",
+                                                   side_effect=stt_side_effect))
+            chat_mod.WebBridge.do_GET(h)
+        return resp
+
+    def test_stt_error_returns_ok_false(self):
+        resp = self._call("/listen?token=secret123", stt_side_effect=RuntimeError("麦克风炸了"))
+        self.assertEqual(resp["code"], 200)
+        self.assertFalse(resp["body"]["ok"])
+        self.assertEqual(resp["body"]["text"], "")
+
+    def test_stt_success_still_works(self):
+        resp = self._call("/listen?token=secret123", stt_side_effect=lambda: "你好呀")
+        self.assertTrue(resp["body"]["ok"])
+        self.assertEqual(resp["body"]["text"], "你好呀")
 
 
 class TestSendEndpoint(unittest.TestCase):

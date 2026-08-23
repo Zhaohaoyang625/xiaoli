@@ -714,8 +714,12 @@ class WebBridge(http.server.BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "forbidden"}, 403)
             return
         if path == "/listen":
-            with listen_lock:  # 防和终端"说"同时开麦克风
-                text = stt.listen_once()
+            # 2026-08-23 兜底：识别异常不崩连接（返回 ok=False，网页提示"没听清"）
+            try:
+                with listen_lock:  # 防和终端"说"同时开麦克风
+                    text = stt.listen_once()
+            except Exception:
+                text = ""
             if text:
                 input_queue.put(("web", text))
             self._json({"ok": bool(text), "text": text or ""})
@@ -745,7 +749,7 @@ class WebBridge(http.server.BaseHTTPRequestHandler):
                 text = urllib.parse.unquote(self.path.split("text=", 1)[1][:100])
             else:
                 # 无参：自动取最近一条你说的（网页语音场景没有输入框，靠这个）
-                for m in reversed(diary.get("messages", [])):
+                for m in reversed((diary or {}).get("messages", [])):
                     if m.get("role") == "user":
                         text = m["content"]
                         break
@@ -765,7 +769,7 @@ class WebBridge(http.server.BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 n = 20
             msgs = []
-            for m in diary.get("messages", [])[-n:]:
+            for m in (diary or {}).get("messages", [])[-n:]:
                 role = m.get("role")
                 if role not in ("user", "assistant"):
                     continue
