@@ -138,6 +138,28 @@ class TestHandleRemember(unittest.TestCase):
         merge_mock.assert_not_called()
 
 
+class TestShowToday(unittest.TestCase):
+    def _run(self, special_text=None):
+        out = io.StringIO()
+        with mock.patch.object(chat_mod.special, "check_today",
+                               return_value=special_text), redirect_stdout(out):
+            chat_mod._show_today()
+        return out.getvalue()
+
+    def test_plain_day_friendly(self):
+        out = self._run(None)
+        self.assertIn("星期", out)
+        self.assertIn("平平常常的一天", out)
+
+    def test_special_day_shown(self):
+        out = self._run("今天是七夕（农历）")
+        self.assertIn("七夕", out)
+
+    def test_birthday_priority(self):
+        out = self._run("今天是他生日（5月20日）")
+        self.assertIn("他生日", out)
+
+
 class TestShowBrief(unittest.TestCase):
     def _run(self, brief_text, refresh_ok=True):
         out = io.StringIO()

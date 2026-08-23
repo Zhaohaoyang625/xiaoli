@@ -552,6 +552,18 @@ def _show_brief():
     print("  ──────────────")
 
 
+def _show_today():
+    """终端「今天」：今天什么日子（生日/节日/农历）"""
+    now = datetime.now()
+    weekday = "一二三四五六日"[now.weekday()]
+    line = f"（今天是 {now.year}年{now.month}月{now.day}日 星期{weekday}"
+    special_text = special.check_today(now)
+    if special_text:
+        print(f"  {line}；{special_text}）")
+    else:
+        print(f"  {line}——平平常常的一天，但有你在就很好）")
+
+
 def _run_backup():
     """终端「备份」：一键打包聊天数据（复用 scripts/backup.py，输出直接透传）"""
     import subprocess
@@ -1040,6 +1052,10 @@ def main():
             # 「备份」（2026-08-23）：一键打包聊天数据（不用记脚本路径）
             if user_input in ("备份", "存个档", "保存存档"):
                 _run_backup()
+                continue
+            # 「今天」（2026-08-23）：今天什么日子（生日/节日/农历）
+            if user_input in ("今天", "什么日子", "今天什么日子"):
+                _show_today()
                 continue
             # 语音输入：输入"说"开始录音 → 火山识别成文字 → 当作你说了这句话
             if user_input in ("说", "语音说", "声控"):
