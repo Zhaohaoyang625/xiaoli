@@ -267,6 +267,8 @@ function applyState(s) {
   if (!faceDemo) {
     document.getElementById("moodline").textContent = m.text + (s.intensity ? " · 程度 " + s.intensity : "");
     document.getElementById("moodline").style.color = m.color;
+    // 2026-08-23：浏览器标签页标题跟着她心情变（"小李 💗 开心"）
+    document.title = "小李 💗 " + m.text.replace(/^\S+\s*/, "");
   }
   document.getElementById("fill").style.width = s.affection + "%";
   document.getElementById("loves").textContent = "好感度：" + s.affection + " / 100";

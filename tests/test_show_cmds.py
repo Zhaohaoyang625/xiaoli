@@ -139,19 +139,29 @@ class TestHandleRemember(unittest.TestCase):
 
 
 class TestShowBrief(unittest.TestCase):
-    def _run(self, brief_text):
+    def _run(self, brief_text, refresh_ok=True):
         out = io.StringIO()
-        with mock.patch.object(chat_mod.world_brief, "load_brief_injection",
+        refresh = mock.Mock()
+        if not refresh_ok:
+            refresh.side_effect = RuntimeError("网络炸了")
+        with mock.patch.object(chat_mod.world_brief, "ensure_fresh", refresh), \
+             mock.patch.object(chat_mod.world_brief, "load_brief_injection",
                                return_value=brief_text), redirect_stdout(out):
             chat_mod._show_brief()
-        return out.getvalue()
+        return out.getvalue(), refresh
 
     def test_prints_brief_text(self):
-        out = self._run("今天的热搜：台湾各地高温。")
+        out, refresh = self._run("今天的热搜：台湾各地高温。")
         self.assertIn("台湾各地高温", out)
+        refresh.assert_called_once()  # 过期自动刷新
 
     def test_empty_brief_friendly_hint(self):
-        out = self._run("")
+        out, _ = self._run("")
+        self.assertIn("还没刷到世界新闻", out)
+
+    def test_refresh_failure_reads_old(self):
+        """联网失败不崩，读旧的（哪怕旧的也空 → 提示）"""
+        out, _ = self._run("", refresh_ok=False)
         self.assertIn("还没刷到世界新闻", out)
 
 

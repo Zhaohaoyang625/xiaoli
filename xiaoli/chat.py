@@ -538,8 +538,12 @@ def _show_heart():
 
 
 def _show_brief():
-    """终端「简报」：她今天知道的世界（只读本地文件，不联网不花钱）"""
+    """终端「简报」：她今天知道的世界（过期自动联网刷一次，24h 限频；失败读旧的）"""
     print("  ── 她今天知道的世界 ──")
+    try:
+        world_brief.ensure_fresh()
+    except Exception:
+        pass  # 刷失败就读旧的（load 有兜底）
     text = world_brief.load_brief_injection()
     if text.strip():
         print(f"  {text.strip()}")
