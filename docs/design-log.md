@@ -402,3 +402,10 @@
 - **WebBridge 健壮性**：/recent /remember 的 `diary or {}` 兜底（bridge 单独启动不 500）；/listen 识别异常 try 包住返回 ok=False（网页提示"没听清"不显示"连不上"）。+3 单测。
 - **网页布局**：气泡面板移到输入框上方（聊天 app 式：消息在上输入在下）；talk-row 按钮 flex-wrap 自动换行（6 个按钮不再挤爆 420px）；聊天记录区首次连不上时显示"先运行 start.bat"提示（不反复刷）。
 - **启动小惊喜**：她记得 ≥7 重要度的事 ≥1 件时，启动打印"她牢牢记着你的 X 件事（输入「记忆」查看）"。
+
+## AM. 终端备份命令 + 网页 JS 语法兜底 + 小细节（2026-08-23，346 全绿）
+- **「备份」终端命令**：一键打包（subprocess 调 scripts/backup.py，输出透传）——小白不用记脚本路径。+2 单测。
+- **scripts/check_web_js.py**：抽 XiaoLi.html 内联 <script> → node --check 语法兜底（前端没有自动化测试，低级语法错误靠这个提前抓；运行时错误如 status 未定义它抓不到，那是浏览器行为）。本机有 node v24，实测 [OK]。
+- **「简报」升级**：过期自动 ensure_fresh() 联网刷一次（24h 限频+锁，失败读旧）——不再"今天没刷过就空白"。+1 单测。
+- **网页细节**：标签页标题随她心情变（"小李 💗 开心"）；聊天记录空状态提示"（还没有对话…）"。
+- **两个测试坑（自己踩的，记下来）**：① `cmd | tail -1 && git commit` —— 管道吞 pytest 退出码，测试失败照样提交！以后测试和提交分两步，或 set -o pipefail；② mock.patch 的断言写在 with 块外 → 访问到恢复后的真实对象（'function' object has no attribute 'assert_not_called'）——持有 Mock 对象引用或把断言放 with 内。

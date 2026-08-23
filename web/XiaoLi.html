@@ -704,6 +704,10 @@ function loadChatlog() {
       if (key === lastChatlogKey) return;  // 没变化不重绘（防滚动跳动）
       lastChatlogKey = key;
       const body = document.getElementById("chatlogBody");
+      if (!msgs.length) {  // 还没聊过：空状态提示（别让人以为坏了）
+        body.innerHTML = '<div class="msg assistant"><div class="bubble">（还没有对话——跟她说句话吧，上面输入框打字或点🎤）</div></div>';
+        return;
+      }
       body.innerHTML = msgs.map(m =>
         '<div class="msg ' + (m.role === "user" ? "user" : "assistant") + '">' +
         '<div class="bubble" title="' + escHtml(m.time) + '">' +
