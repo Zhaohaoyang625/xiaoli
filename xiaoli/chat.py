@@ -260,12 +260,12 @@ def say_with_continuation(prefix, inner, spoken, continuation=(), _interrupt=Fal
     _round_done.clear()   # 这轮开始说话：keep_talking 必须等我说完才能开始计时
     if inner:
         print(f"💭（小李心想：{inner}）")
-    display_text = _strip_reminder_tags(spoken)
+    display_text = _strip_pause_tags(_strip_reminder_tags(spoken))
     print(f"小李{prefix}：{display_text}")
     update_face(display_text)
     # 上限 3 条（防失控保险：模型再怎么话痨也不会无上限；情绪激动时的连珠炮
     # 是正常的，平静时的 2-3 条由 persona 教法"大多数 []"控制）
-    conts = [_strip_reminder_tags(c) for c in (continuation or ())
+    conts = [_strip_pause_tags(_strip_reminder_tags(c)) for c in (continuation or ())
              if isinstance(c, str) and c.strip()][:3]
     # 用"播完回调"而不是 wait：播放不阻塞主循环，你随时插话都能立即生效。
     # 主话播放完（或被打断）→ 回调再决定补不补话；这轮全部结束 → 释放语音互斥锁
@@ -434,6 +434,12 @@ def _strip_reminder_tags(text):
     text = re.sub(r"\[reminder:\d+\s*(min|hour|day)\].*?\[/reminder\]", "", text, flags=re.S)
     text = re.sub(r"\[reminder:\d+\s*(min|hour|day)\](.*?)(?=\[|\Z)", "", text, flags=re.S)
     return text.strip()
+
+
+def _strip_pause_tags(text):
+    """显示时去掉 <pause/> 停顿标签（2026-08-23：它是语音层指令，显示文本不出现）。
+    容忍 <pause>、<pause:1.5>、大小写变体。"""
+    return re.sub(r"<pause(?::[0-9.]+)?/?>", "", text, flags=re.IGNORECASE).strip()
 
 
 # C3 重试瘦身轮数：提醒补写重试只需"近因上下文"（他刚求了提醒），

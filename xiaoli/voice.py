@@ -78,7 +78,8 @@ def speakable(text):
     1. 去掉提醒标签、波浪号（~ 会让TTS怪停顿）
     2. 整段剥掉 <...>（2026-08-22：LLM 偶发输出尖括号标注，内容残留会被念出来）
     3. 去掉 emoji/特殊符号
-    4. 台语特有词替换为普通话说法"""
+    4. 台语特有词替换为普通话说法
+    （<pause...> 停顿标签在调用方已被 _protect_pauses 转成占位符，不受影响）"""
     t = re.sub(r"\[.*?\]", "", text)
     t = re.sub(r"<[^>]*>", "", t)  # 尖括号整段剥（含内容，防残留念出）
     t = t.replace("～", "，").replace("~", "，")
@@ -87,6 +88,43 @@ def speakable(text):
     for tw, cn in _SPEAK_MAP.items():
         t = t.replace(tw, cn)
     return t.strip()
+
+
+# ============================================
+# <pause/> 停顿标签（2026-08-23，学自 Open-LLM-VTuber 的 [pause] 设计）：
+#   真人研究点名项（human-like-dialogue.md）——"停顿由她决定"比固定停顿自然。
+#   LLM 在句尾写 <pause/>（或 <pause:1.5> 指定秒数）→ 程序转静音段入队播放。
+#   实现：speakable 会剥尖括号 → 先保护成明文占位符 PAUSEHOLD1.5（字母数字
+#   清洗/切句都杀不到，TTS 前才解析掉）→ 逐句解析 → 该句播完后插静音段。
+# ============================================
+_PAUSE_RE = re.compile(r"<pause(?::([0-9]+(?:\.[0-9]+)?))?/?>", re.IGNORECASE)
+_PAUSE_HOLD_RE = re.compile(r"PAUSEHOLD[0-9]*")  # 占位符纯数字（毫秒，小数点会被 speakable 删掉）
+_PAUSE_DEFAULT = 0.8  # 真人深吸一口气 ≈ 0.8s（句间默认只有 0.25s）
+_PAUSE_MIN = 0.3
+_PAUSE_MAX = 2.5
+
+
+def _protect_pauses(text):
+    """<pause:1.5> → PAUSEHOLD1500（毫秒整数；speakable 之前调用，防清洗杀掉）"""
+    return _PAUSE_RE.sub(
+        lambda m: f"PAUSEHOLD{int(float(m.group(1)) * 1000) if m.group(1) else ''}",
+        text)
+
+
+def _parse_pauses(s):
+    """句子里的停顿占位 → (干净句, 停顿秒数)。PAUSEHOLD（默认0.8s）/PAUSEHOLD1500（毫秒）。"""
+    m = _PAUSE_HOLD_RE.search(s)
+    if not m:
+        return s, 0.0
+    clean = _PAUSE_HOLD_RE.sub("", s).strip()
+    raw = m.group(0)[9:]  # 去掉 PAUSEHOLD 前缀取数字部分（毫秒）
+    pause = float(raw) / 1000.0 if raw else _PAUSE_DEFAULT
+    return clean, max(_PAUSE_MIN, min(pause, _PAUSE_MAX))
+
+
+def _silence_pcm(sec):
+    """静音段（24k int16 零 PCM）——播放线程当普通音频播，停顿自然衔接"""
+    return b"\x00\x00" * int(24000 * sec)
 
 
 # ============================================
@@ -190,6 +228,15 @@ def _synth_worker(text, emotion, gen, on_started):
     for s in sentences:
         if gen != _gen:
             return
+        # <pause/> 停顿：剥占位符 → 干净句 + 该句播完后的停顿秒数
+        clean, pause = _parse_pauses(s)
+        if _is_trivial(clean):
+            # 整句只有停顿标签（"齁～<pause/>"切出的尾巴）→ 只停不播
+            if pause:
+                _tts_queue.put((24000, _silence_pcm(pause)))
+                _speaking_until = time.time() + pause + 0.5
+            continue
+        s = clean
         # 三层降级链（2026-08-22）：本地克隆小李音色 → 火山甜妹 → edge 晓晓。
         # 逐句做，单句失败跳过不拖累整段（dsh catch 后继续链同款）。
         sr, pcm = None, None
@@ -218,9 +265,12 @@ def _synth_worker(text, emotion, gen, on_started):
             sr, pcm = edge
         if gen != _gen:
             return
-        # 口型同步：滚动延长"说话截止时间"（每句入队 + 音频时长 + 缓冲）
-        _speaking_until = time.time() + len(pcm) / (sr * 2) + 0.5
+        # 口型同步：滚动延长"说话截止时间"（每句入队 + 音频时长 + 停顿 + 缓冲）
+        _speaking_until = time.time() + len(pcm) / (sr * 2) + pause + 0.5
         _tts_queue.put((sr, pcm))
+        if pause:
+            # <pause/> → 该句播完插静音段（她"深吸一口气"再往下说）
+            _tts_queue.put((24000, _silence_pcm(pause)))
         if first and on_started:
             first = False
             try:
@@ -281,7 +331,7 @@ def play_speech(text, speak=True, on_done=None, on_started=None, emotion=None):
             except Exception:
                 pass
         return
-    text = speakable(text)  # 清洗（指令由 tts_api 在清洗之后拼）
+    text = speakable(_protect_pauses(text))  # 清洗（指令由 tts_api 在清洗之后拼）；<pause> 先保护
     _gen += 1  # 新的话来了 → 旧队列让位（旧合成/播放线程下次检查会收手）
     gen = _gen
     # 清掉旧线程可能残留的队列（竞态残留无害：P 线程播到它时 gen 检查会丢弃）
