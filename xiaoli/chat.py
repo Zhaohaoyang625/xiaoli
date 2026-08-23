@@ -490,6 +490,34 @@ def proactive_talk(event_type, content, recall_lines=""):
         return ""
 
 
+def handle_photo(path):
+    """看照片（2026-08-23，视觉模型）：他发图片路径 → 她"看"了再回应。
+    不经过文本大脑（一个调用搞定，单张 ~0.0012 元）；
+    照片内容不存日记（隐私+噪音），只留痕迹；值得记住的写档案（她记得"你看过什么"）。
+    日记/记忆写失败不影响她说（各自兜底）。"""
+    print("  📷（她凑过来看照片…）")
+    _see, _photo_memory = vision.look_at_photo(path)
+    if not _see:
+        _see = "齁…这张照片人家打不开捏，你换个图试试？"
+    if _photo_memory:
+        memory_mod.merge_fact(facts, f"他给我看过一张照片，里面：{_photo_memory}",
+                              importance=5, category="看过的照片")
+        memory_mod.save_facts(facts)
+    print("\n" + "=" * 30)
+    say_with_continuation("", "", _see, ())
+    print("=" * 30)
+    # 记日记：照片不存内容（隐私+噪音），只留痕迹——她记得"看过一张照片"
+    stamp = context.now_str()
+    with diary_lock:
+        diary["messages"].append(
+            {"role": "user", "content": "【图片】他发了一张照片", "time": stamp})
+        diary["messages"].append(
+            {"role": "assistant", "content": _see, "time": stamp})
+        context.compress(diary)
+        context.save_diary(diary)
+    proactive.mark_activity()  # 你发照片了，她不用急着找话
+
+
 def handle_event(event_type, content, extra):
     """B.2 后台调度器回调：小李主动找你说话（节奏窗口到点 / 提醒到点）。
     v2 P3 重构：主动事件走独立小调用（AIRI spark:notify）——不进主对话流；
@@ -884,28 +912,7 @@ def main():
         # 看照片（2026-08-23，视觉模型）：他发图片路径 → 她"看"了再回应，
         # 不经过文本大脑（一个调用搞定，单张 ~0.0012 元）
         if vision.is_photo_path(user_input):
-            print("  📷（她凑过来看照片…）")
-            _see, _photo_memory = vision.look_at_photo(user_input)
-            if not _see:
-                _see = "齁…这张照片人家打不开捏，你换个图试试？"
-            # 照片里值得记住的事 → 写档案（她记得"你给她看过什么"，下次能接上）
-            if _photo_memory:
-                memory_mod.merge_fact(facts, f"他给我看过一张照片，里面：{_photo_memory}",
-                                      importance=5, category="看过的照片")
-                memory_mod.save_facts(facts)
-            print("\n" + "=" * 30)
-            say_with_continuation("", "", _see, ())
-            print("=" * 30)
-            # 记日记：照片不存内容（隐私+噪音），只留痕迹——她记得"看过一张照片"
-            stamp = context.now_str()
-            with diary_lock:
-                diary["messages"].append(
-                    {"role": "user", "content": "【图片】他发了一张照片", "time": stamp})
-                diary["messages"].append(
-                    {"role": "assistant", "content": _see, "time": stamp})
-                context.compress(diary)
-                context.save_diary(diary)
-            proactive.mark_activity()  # 你发照片了，她不用急着找话
+            handle_photo(user_input)
             continue
 
         # v2 E2 安慰阶段推进：用上一轮独立分类器判出的他心情（首轮没有 → 关键词兜底）

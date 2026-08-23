@@ -144,6 +144,56 @@ class TestLookAtPhoto(unittest.TestCase):
         self.assertEqual(memory, "")
 
 
+class TestHandlePhoto(unittest.TestCase):
+    """主循环照片分支（handle_photo）：日记两条 + 记忆写入 + 失败兜底"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        # 挂模块级状态（main() 里是 global，测试里直接设）
+        chat_mod.diary = {"messages": [], "summary": "", "daily": {}}
+        chat_mod.facts = []
+        self._saved = chat_mod.diary, chat_mod.facts
+
+    def tearDown(self):
+        chat_mod.diary, chat_mod.facts = self._saved
+
+    def _run(self, see="這貓貓好可愛！", memory=""):
+        with mock.patch.object(chat_mod.vision, "look_at_photo", return_value=(see, memory)), \
+             mock.patch.object(chat_mod, "say_with_continuation"), \
+             mock.patch.object(chat_mod.context, "compress",
+                               side_effect=lambda d: d), \
+             mock.patch.object(chat_mod.context, "save_diary"), \
+             mock.patch.object(chat_mod.proactive, "mark_activity"), \
+             mock.patch.object(chat_mod.memory_mod, "save_facts"):
+            chat_mod.handle_photo(r"C:\fake\cat.jpg")
+
+    def test_reply_saved_to_diary(self):
+        """她的话进日记；照片内容不进日记（只有痕迹）"""
+        self._run(see="這隻貓貓好可愛！你在哪拍的呀？")
+        msgs = chat_mod.diary["messages"]
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[0]["role"], "user")
+        self.assertEqual(msgs[0]["content"], "【图片】他发了一张照片")
+        self.assertEqual(msgs[1]["role"], "assistant")
+        self.assertEqual(msgs[1]["content"], "這隻貓貓好可愛！你在哪拍的呀？")
+
+    def test_memory_written_when_notable(self):
+        """照片里有值得记住的事 → 写档案"""
+        self._run(memory="他新养的橘猫叫毛毛")
+        self.assertEqual(len(chat_mod.facts), 1)
+        self.assertIn("毛毛", chat_mod.facts[0]["content"])
+        self.assertEqual(chat_mod.facts[0]["importance"], 5)
+
+    def test_no_memory_when_empty(self):
+        self._run(memory="")
+        self.assertEqual(chat_mod.facts, [])
+
+    def test_fallback_when_vision_fails(self):
+        """视觉失败 → 兜底话照说照记"""
+        self._run(see=None, memory="")
+        self.assertEqual(chat_mod.diary["messages"][1]["content"], "齁…这张照片人家打不开捏，你换个图试试？")
+
+
 class TestPhotoEndpoint(unittest.TestCase):
     """WebBridge /photo 端点：鉴权 + 魔数校验 + 存收件箱 + 进输入队列"""
 
