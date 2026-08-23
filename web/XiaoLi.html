@@ -144,7 +144,8 @@
   .msg.assistant .bubble { background: #ffd9e5; color: #8a3050; }
 
   /* ======= 说话按钮 ======= */
-  .talk-row { margin-top: 12px; display: flex; gap: 10px; justify-content: center; align-items: center; }
+  .talk-row { margin-top: 12px; display: flex; gap: 8px; justify-content: center; align-items: center;
+    flex-wrap: wrap; }  /* 2026-08-23：按钮多了自动换行，不挤爆 420px */
   .talkbtn {
     background: linear-gradient(135deg, #ff9bb8, #d4487a);
     color: #fff; border: none; border-radius: 30px;
@@ -215,15 +216,15 @@
     </div>
     <div id="talkStatus"></div>
   </div>
-  <!-- 💬 打字聊天（2026-08-23）：网页输入框，和终端聊天同一份日记 -->
-  <div class="send-row">
-    <input type="text" id="sendInput" placeholder="打字跟她说…（回车发送）" maxlength="200">
-    <button class="talkbtn small" id="sendBtn">发送</button>
-  </div>
   <!-- 💬 最近对话（2026-08-23）：网页也能看到聊了啥，刷新不丢（数据在后端日记里） -->
   <div class="chatlog" id="chatlog">
     <div class="chatlog-title">最近对话（每 2 秒刷新 · 悬停看时间）</div>
     <div id="chatlogBody"></div>
+  </div>
+  <!-- 💬 打字聊天（2026-08-23）：网页输入框，和终端聊天同一份日记 -->
+  <div class="send-row">
+    <input type="text" id="sendInput" placeholder="打字跟她说…（回车发送）" maxlength="200">
+    <button class="talkbtn small" id="sendBtn">发送</button>
   </div>
   <div class="footer">先运行 python -m xiaoli.chat --voice（或双击 start.bat），点🎤直接开口跟她说话</div>
 </div>
@@ -688,10 +689,12 @@ function escHtml(s) {
   return String(s).replace(/[&<>"']/g, c =>
     ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 }
+let bridgeDown = false;  // 连续失败 → 只提示一次，不刷屏
 function loadChatlog() {
   fetch(BRIDGE + "/recent?n=20" + BRIDGE_TOKEN())
     .then(r => r.json())
     .then(d => {
+      bridgeDown = false;
       if (!d.ok || !Array.isArray(d.messages)) return;
       const msgs = d.messages;
       const last = msgs.length ? msgs[msgs.length - 1] : null;
@@ -706,7 +709,14 @@ function loadChatlog() {
       ).join("");
       body.scrollTop = body.scrollHeight;  // 始终滚到最新一条
     })
-    .catch(() => {});  // 桥没开/网页单独打开时安静跳过
+    .catch(() => {
+      // 桥没开/网页单独打开：第一次失败提示怎么修，不反复刷
+      if (!bridgeDown) {
+        bridgeDown = true;
+        const body = document.getElementById("chatlogBody");
+        body.innerHTML = '<div class="msg assistant"><div class="bubble">⚠️ 本地桥没启动——先运行 start.bat（或 python -m xiaoli.chat --voice）</div></div>';
+      }
+    });
 }
 loadChatlog();
 setInterval(loadChatlog, 2000);
