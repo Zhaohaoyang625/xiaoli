@@ -76,6 +76,31 @@ class TestShowHeart(unittest.TestCase):
         self.assertIn("60", out)    # affection 默认
 
 
+class TestRememberText(unittest.TestCase):
+    """终端「记住XXX」提取规则：不误记疑问句/太短的"""
+
+    def test_extracts_after_prefix(self):
+        self.assertEqual(chat_mod._remember_text("记住我喜欢喝奶茶"),
+                         (True, "我喜欢喝奶茶"))
+        self.assertEqual(chat_mod._remember_text("记下我的生日是5月20号"),
+                         (True, "我的生日是5月20号"))
+        self.assertEqual(chat_mod._remember_text("帮我记着我最怕打针"),
+                         (True, "我最怕打针"))
+
+    def test_question_not_remembered(self):
+        """"记住了吗/记住没"这类不是要记的内容"""
+        self.assertEqual(chat_mod._remember_text("记住了吗"), (False, ""))
+        self.assertEqual(chat_mod._remember_text("记住没"), (False, ""))
+
+    def test_too_short_skipped(self):
+        self.assertEqual(chat_mod._remember_text("记住"), (False, ""))
+        self.assertEqual(chat_mod._remember_text("记住啊"), (False, ""))  # 短+语气词
+
+    def test_plain_chat_not_remembered(self):
+        """不带前缀的正常聊天不触发"""
+        self.assertEqual(chat_mod._remember_text("你今天记住要买奶茶了吗"), (False, ""))
+
+
 class TestShowBrief(unittest.TestCase):
     def _run(self, brief_text):
         out = io.StringIO()
