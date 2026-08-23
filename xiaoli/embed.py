@@ -2,7 +2,7 @@
 # 本地语义向量（v2 O3，bge-small-zh-v1.5 ONNX）
 # 为什么上真 embedding：字符 bigram 召回"字面"相关，语义相关抓不到
 # （他记忆"怕高"，今天说"要去爬山"——无共同字符，旧检索漏掉）。
-# 方案：bge-small-zh-v1.5（中文语义模型，768 维，~100MB ONNX）+ onnxruntime 推理，
+# 方案：bge-small-zh-v1.5（中文语义模型，512 维，~95MB ONNX）+ onnxruntime 推理，
 # 纯 Python WordPiece 分词（不装 transformers/torch，保持项目轻）。
 # 优雅降级：模型文件缺失/加载失败 → embed() 返回 None → memory.py 退回字符向量。
 # 下载（2026-08-22，hf-mirror 单文件，GitHub/HF 直连不通的替代）：
@@ -27,6 +27,11 @@ MAX_LEN = 64  # 记忆条目和用户输入都是短句，64 足够，推理更�
 _session = None  # 惰性加载的 ONNX 会话（全局只加载一次）
 _vocab = None
 _failed = False
+
+
+def _files_ready():
+    """模型 + 词表是否都在（启动自检用，不加载不占显存）"""
+    return os.path.exists(MODEL_PATH) and os.path.exists(VOCAB_PATH)
 
 
 def _load():
@@ -111,7 +116,7 @@ def tokenize(text):
 
 
 def embed(text, is_query=False):
-    """文本 → 768 维归一化向量（numpy）。模型不可用 → None（调用方降级）。
+    """文本 → 512 维归一化向量（numpy）。模型不可用 → None（调用方降级）。
     is_query：查询端加 bge 官方中文指令（记忆条目是文档端，不加）"""
     if not _load():
         return None
@@ -119,7 +124,12 @@ def embed(text, is_query=False):
         if is_query:
             text = QUERY_INSTRUCTION + text
         ids, mask = tokenize(text)
-        out = _session.run(None, {"input_ids": ids, "attention_mask": mask})
+        # 模型输入三件套：input_ids / attention_mask / token_type_ids（全 0，单句无分段）
+        out = _session.run(None, {
+            "input_ids": ids,
+            "attention_mask": mask,
+            "token_type_ids": np.zeros_like(ids),
+        })
         vec = out[0][0, 0, :]  # [CLS] → [768]
         n = float(np.linalg.norm(vec))
         if n < 1e-9:

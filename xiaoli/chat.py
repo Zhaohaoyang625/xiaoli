@@ -32,6 +32,7 @@ from xiaoli import whisper_stt  # 本地识别（2026-08-22：0 元/月替代火
 from xiaoli import tts_local  # 本地合成（2026-08-22：Qwen3-TTS 声音克隆，0 元/月替代火山）
 from xiaoli import call_mode  # O2 通话模式（2026-08-22）
 from xiaoli import vision  # 看照片（2026-08-23：DeepSeek 视觉模型，base64 内联）
+from xiaoli import embed  # 语义记忆（2026-08-23：bge-small-zh，启动自检用）
 from xiaoli.persona import SYSTEM_PROMPT
 
 # 日记/心的写入锁：后台主动消息线程和主聊天线程都写日记，防并发错乱
@@ -935,6 +936,8 @@ def main():
         " ← models/Qwen3-TTS 没下载，语音走火山/edge" if not os.path.isdir(tts_local._MODEL_DIR) else ""))
     print(f"  {_mark(os.path.isdir(whisper_stt._MODEL_PATH))} 本地识别" + (
         " ← models/faster-whisper 没下载，「说」走火山识别" if not os.path.isdir(whisper_stt._MODEL_PATH) else ""))
+    print(f"  {_mark(embed._files_ready())} 语义记忆" + (
+        " ← models/bge-small-zh 没下载，记忆只认字面不认意思" if not embed._files_ready() else ""))
     print(f"  {_mark(not _backup_due())} 数据备份" + (
         " ← 超过 7 天没备份了，跑 python scripts/backup.py 保护聊天记录" if _backup_due() else ""))
     print("  ────────────")

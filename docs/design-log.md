@@ -409,3 +409,11 @@
 - **「简报」升级**：过期自动 ensure_fresh() 联网刷一次（24h 限频+锁，失败读旧）——不再"今天没刷过就空白"。+1 单测。
 - **网页细节**：标签页标题随她心情变（"小李 💗 开心"）；聊天记录空状态提示"（还没有对话…）"。
 - **两个测试坑（自己踩的，记下来）**：① `cmd | tail -1 && git commit` —— 管道吞 pytest 退出码，测试失败照样提交！以后测试和提交分两步，或 set -o pipefail；② mock.patch 的断言写在 with 块外 → 访问到恢复后的真实对象（'function' object has no attribute 'assert_not_called'）——持有 Mock 对象引用或把断言放 with 内。
+
+## AN. 语义记忆真正上线（2026-08-23，365 全绿）
+- **发现：models/bge-small-zh/ 一直是空目录——语义记忆（v2 记忆引擎核心）上线以来一直在降级运行**！embed() 每次返回 None → memory.py 退回字符 bigram（只认字面不认意思）——"他怕高"和"要去爬山"永远匹配不上。今天补测（tests/test_embed.py 14 项：分词/归一化/降级全路径）才发现。
+- **下载踩坑三连（网络环境老熟人）**：① BAAI 官方仓库没有 ONNX 导出（只有 pytorch_model.bin），404 错误页只有 15 字节，而 hf-mirror 对 404 也返回 HTTP 200 → curl 无 -f 时 exit 0 假装成功 → 拿 15 字节垃圾当模型；② curl -C - 断点续传会把旧垃圾头 + range 响应拼成一个损坏文件（94851877 字节、文件头合法 `08 06 12 07` 但 protobuf 解析崩 INVALID_PROTOBUF）——**下载必须三连：-f 严格失败 + 删旧文件 + 下载后 onnx.ModelProto 完整校验**；③ 换 Xenova/bge-small-zh-v1.5（社区 ONNX 导出：onnx/model.onnx 94.8MB + vocab.txt）才下到真文件。
+- **真 bug 修复：模型输入三件套**——ort 报错前先看 get_inputs()：input_ids/attention_mask/**token_type_ids**，embed.py 只传了两个 → onnxruntime 静默填默认值其实也会错/或报缺输入。补上 token_type_ids（全 0 单句）。输出是 **512 维**（bge-small-zh 是 small，不是 768）——注释和文档修正。
+- **核心承诺验证（真模型推理）**：「怕高」vs「要去爬山」余弦 0.3398 > 无关句；端到端 recall 测试：「明天要去爬山」→ 命中「他怕高，不敢坐摩天轮」（零共同字符，纯语义）／「想喝点甜的饮料」→「他喜欢喝奶茶」／「我的工作地点在哪」→「他在台北工作」。**v2 记忆引擎的语义召回从今天起真正工作**。
+- **pytest.ini 新增**：testpaths=tests——scripts/ 下的 test_search.py 是真 API 实测脚本（会花钱），裸跑 `pytest` 会被误收集报 collection error，以后裸跑也只跑 tests/。
+- 启动自检第 7 项「语义记忆」[OK]；推理速度毫秒级（CPU），对主循环无感。
