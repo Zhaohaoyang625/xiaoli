@@ -52,3 +52,9 @@ python chat.py --voice
 python -m pytest tests/ -q           # 300+ 单元测试
 python tests/final_e2e.py            # 全链路实测（真 API，约 1 分钟）
 ```
+
+## 备份
+
+```bash
+python scripts/backup.py             # 聊天记录/记忆打包到 backups/（自动留最近 5 份）
+```
