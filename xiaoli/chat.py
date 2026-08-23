@@ -548,6 +548,17 @@ def _show_brief():
     print("  ──────────────")
 
 
+def _run_backup():
+    """终端「备份」：一键打包聊天数据（复用 scripts/backup.py，输出直接透传）"""
+    import subprocess
+    try:
+        subprocess.run([sys.executable,
+                        os.path.join(paths.ROOT, "scripts", "backup.py")],
+                       timeout=120)
+    except Exception as e:
+        print(f"  [X] 备份失败：{e}")
+
+
 def handle_remember(text):
     """终端「记住XXX」→ 高重要度记忆（同网页📌语义）。返回 True = 这条输入已被处理（不再发给大脑）。"""
     if not (text.startswith("记住") or text.startswith("记下") or text.startswith("帮我记着")):
@@ -890,7 +901,7 @@ def main():
     print("=" * 40)
     print("  小李上线啦～ 跟她聊天吧！")
     print("  输入 exit 或 再见 退出；语音开/语音关 切换声音；通话开/通话关 免按键对话")
-    print("  试试：记忆（她记得你什么）｜心情（她的心）｜简报（她今天知道的世界）")
+    print("  试试：记忆（她记得你什么）｜心情（她的心）｜简报（她今天知道的世界）｜备份")
     if voice_on:
         print("  🔊 语音模式：她说的话会念出来（台湾腔）")
     # 启动自检（2026-08-23）：一眼看出什么没配好（只看配置和文件，不加载模型）
@@ -1021,6 +1032,10 @@ def main():
             # 「记住XXX」（2026-08-23）：像网页📌按钮一样存高重要度记忆
             #   （对话里自然说"记住我的生日是5月20"她也会记，这是明确命令版）
             if handle_remember(user_input):
+                continue
+            # 「备份」（2026-08-23）：一键打包聊天数据（不用记脚本路径）
+            if user_input in ("备份", "存个档", "保存存档"):
+                _run_backup()
                 continue
             # 语音输入：输入"说"开始录音 → 火山识别成文字 → 当作你说了这句话
             if user_input in ("说", "语音说", "声控"):
