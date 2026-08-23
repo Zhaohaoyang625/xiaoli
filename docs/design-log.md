@@ -382,3 +382,6 @@
 
 ## AH. 照片承诺闭环 + 真 HTTP 验证 + 备份脚本（2026-08-23，短时优化最终收尾）
 **①真 HTTP 测试抓到 multipart 坑**：mock 测试发裸字节全绿，真 HTTP POST（模拟浏览器 FormData）→ 400——**FormData 的 multipart 包装让 body 前 4 字节是 `--bo`，魔数校验误判垃圾文件**。修复：前端 fetch 直接 `body: f`（裸文件字节，浏览器自动带 image/png Content-Type），服务端魔数校验照旧。重测：裸字节 200 落盘 / 文本冒充 400 / 无 token 403。**教训：上传类端点必须真 HTTP 验证（mock 层测试抓不到协议层问题）**。**②O6 承诺闭环缺口**：他说"待会给你看照片"→ 承诺槽 keyword="照片" → 他真发图（路径文本 C:\Pics\cat.jpg）→ promise_hint 按 `"照片" in user_input` 判不到 → 槽不兑现 → 她下轮还惦记"没给我看"（明明看了！）。修复：promise_hint 加 `_is_photo_input`（延迟 import vision.is_photo_path，防循环依赖），发图路径也算兑现清槽。**③scripts/backup.py 一键备份**：data/（聊天记录/记忆/她的心/提醒/照片收件箱）打包 backups/backup_时间戳.zip，自动留最近 5 份删旧；实测 20 文件 1.0MB 完整性 OK；backups/ 进 .gitignore（含私密数据）；README 加备份小节。**301 全绿 + e2e 17 项**。
+
+## AI. handle_photo 抽函数（2026-08-23 12:5x，重构收尾）
+照片分支从主循环抽出 `handle_photo(path)`（chat.py，main() 已 global diary/facts，函数直接引用模块级）——行为零变化，换来 4 项单测（日记两条含"【图片】痕迹不存内容"/记忆写入 importance=5/无记忆不写/视觉失败兜底话照说照记）。照片全链路（端点/解析/主逻辑）至此全部有测试保护。305 全绿。

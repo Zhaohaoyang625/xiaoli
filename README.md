@@ -21,8 +21,8 @@
 python scripts/setup_keys.py --set deepseek
 python scripts/setup_keys.py --set volc
 
-# 2. 启动
-python chat.py --voice
+# 2. 启动（也可以双击 start.bat）
+python -m xiaoli.chat --voice
 ```
 
 启动后：
