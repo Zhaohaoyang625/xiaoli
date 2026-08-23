@@ -101,6 +101,43 @@ class TestRememberText(unittest.TestCase):
         self.assertEqual(chat_mod._remember_text("你今天记住要买奶茶了吗"), (False, ""))
 
 
+class TestHandleRemember(unittest.TestCase):
+    """「记住XXX」命令接线：处理了就吃掉输入（不发大脑），不处理的走正常聊天"""
+
+    def _call(self, text):
+        """返回 (handled, 输出, facts_列表, merge_mock, save_mock)。
+        注意：facts_列表是真实引用、mocks 是对象——with 退出后仍可断言（patch 恢复的是模块属性，不是这些对象）"""
+        out = io.StringIO()
+        facts_holder = []
+        with mock.patch.object(chat_mod, "facts", facts_holder), \
+             mock.patch.object(chat_mod.memory_mod, "merge_fact") as merge_mock, \
+             mock.patch.object(chat_mod.memory_mod, "save_facts") as save_mock, \
+             redirect_stdout(out):
+            merge_mock.side_effect = lambda facts, content, **kw: facts.append(
+                {"content": content, **kw})
+            handled = chat_mod.handle_remember(text)
+        return handled, out.getvalue(), facts_holder, merge_mock, save_mock
+
+    def test_plain_chat_not_handled(self):
+        handled, _, _, _, _ = self._call("今天天气不错")
+        self.assertFalse(handled)
+
+    def test_valid_remember_handled_and_saved(self):
+        handled, out, facts_holder, _, save_mock = self._call("记住我喜欢喝奶茶")
+        self.assertTrue(handled)
+        self.assertIn("我喜欢喝奶茶", out)
+        self.assertEqual(facts_holder[0]["importance"], 9)
+        self.assertEqual(facts_holder[0]["category"], "他特意让我记住的")
+        save_mock.assert_called_once()
+
+    def test_question_handled_but_not_saved(self):
+        """「记住了吗」被吃掉（不发给大脑），但也不误记"""
+        handled, out, _, merge_mock, _ = self._call("记住了吗")
+        self.assertTrue(handled)
+        self.assertIn("没听清要记住啥", out)
+        merge_mock.assert_not_called()
+
+
 class TestShowBrief(unittest.TestCase):
     def _run(self, brief_text):
         out = io.StringIO()

@@ -548,6 +548,20 @@ def _show_brief():
     print("  ──────────────")
 
 
+def handle_remember(text):
+    """终端「记住XXX」→ 高重要度记忆（同网页📌语义）。返回 True = 这条输入已被处理（不再发给大脑）。"""
+    if not (text.startswith("记住") or text.startswith("记下") or text.startswith("帮我记着")):
+        return False
+    ok, content = _remember_text(text)
+    if ok:
+        memory_mod.merge_fact(facts, content, importance=9, category="他特意让我记住的")
+        memory_mod.save_facts(facts)
+        print(f"  📌（她特别记住了：{content}）")
+    else:
+        print("  （没听清要记住啥——比如：记住我喜欢喝奶茶）")
+    return True
+
+
 def _remember_text(text):
     """终端「记住XXX」→ 提取要记的内容（返回 (ok, 内容)）。
     疑问句/太短不存（"记住了吗"这种不是要记的内容），防误记。"""
@@ -1006,15 +1020,7 @@ def main():
                 continue
             # 「记住XXX」（2026-08-23）：像网页📌按钮一样存高重要度记忆
             #   （对话里自然说"记住我的生日是5月20"她也会记，这是明确命令版）
-            if user_input.startswith(("记住", "记下", "帮我记着")):
-                ok, content = _remember_text(user_input)
-                if ok:
-                    memory_mod.merge_fact(facts, content, importance=9,
-                                          category="他特意让我记住的")
-                    memory_mod.save_facts(facts)
-                    print(f"  📌（她特别记住了：{content}）")
-                else:
-                    print("  （没听清要记住啥——比如：记住我喜欢喝奶茶）")
+            if handle_remember(user_input):
                 continue
             # 语音输入：输入"说"开始录音 → 火山识别成文字 → 当作你说了这句话
             if user_input in ("说", "语音说", "声控"):
