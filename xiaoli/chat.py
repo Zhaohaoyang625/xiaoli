@@ -959,17 +959,13 @@ def main():
 
     # 读档案记忆：她记得关于你的事（B.3），先做记忆老化（太久没提的会淡忘）
     facts = memory_mod.load_facts()
-    # 2026-08-23：她记得几件重要的事，启动时告诉你（输入「记忆」能看全部）
-    important_count = sum(1 for f in facts if f.get("importance", 0) >= 7)
-    if important_count:
-        print(f"  （她牢牢记着你的 {important_count} 件事——随时输入「记忆」查看）")
     if facts:
         facts, forgotten = memory_mod.decay(facts)
         if forgotten:
             print(f"  （她渐渐淡忘了一些小事…{forgotten}件）")
         memory_mod.save_facts(facts)
         if facts:
-            print(f"  （她记得关于你的 {len(facts)} 件事）")
+            print(f"  （她记得关于你的 {len(facts)} 件事——输入「记忆」可查看）")
 
     # B.2 启动检查：程序关闭期间到点的提醒 → 开机浮现（她给你留了话）
     missed = proactive.get_missed_reminders()
