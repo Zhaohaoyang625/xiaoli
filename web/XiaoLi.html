@@ -361,10 +361,10 @@ document.getElementById("photoInput").addEventListener("change", () => {
     status.textContent = "📷 这张太大啦（最多 20MB）";
     return;
   }
-  const fd = new FormData();
-  fd.append("photo", f);
+  // 直接发裸文件字节（不包 FormData）——服务端按图片魔数校验，
+  // 包 multipart 的话前 4 字节是 --bo 会被误判垃圾文件（实测 400）
   status.textContent = "📷 她在看照片…";
-  fetch(BRIDGE + "/photo" + BRIDGE_TOKEN(), { method: "POST", body: fd })
+  fetch(BRIDGE + "/photo" + BRIDGE_TOKEN(), { method: "POST", body: f })
     .then(r => r.json())
     .then(d => {
       status.textContent = d.ok ? "📷 她看到照片了！" : "📷 传送失败：" + (d.error || "未知错误");

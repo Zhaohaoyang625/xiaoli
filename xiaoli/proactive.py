@@ -475,6 +475,17 @@ class Scheduler:
 
 
 # ---------- O6 工作记忆：他说"待会给你看照片"→ 她记得，下次对话带出 ----------
+def _is_photo_input(text):
+    """他这轮是不是发了图片路径（= 兑现"给你看照片"的承诺）。
+    延迟 import 防循环依赖（vision 只在需要时引入）。"""
+    try:
+        from xiaoli import vision
+        return vision.is_photo_path(text)
+    except Exception:
+        return False
+
+
+
 # 学自《Cognitive Architectures for Language Agents》的工作记忆槽：
 # "他答应过、还没兑现的事"不该进长期档案（记了也是噪音），而是短期工作槽——
 # 下轮对话带出提醒，兑现/两次提醒后清空。真人也是这样：记得，但不唠叨。
@@ -516,8 +527,11 @@ def promise_hint(user_input):
     if not promise:
         return None
     kw = promise.get("keyword", "")
-    if kw and kw in user_input:
-        _save_json(PROMISE_FILE, None)  # 兑现了 → 清槽
+    if (kw and kw in user_input) or _is_photo_input(user_input):
+        # 兑现了 → 清槽。2026-08-23：他说"待会给你看照片"→ 真发的是图片路径
+        # （如 C:\Pics\cat.jpg），路径里没有"照片"两字 → 按关键词判不到，
+        # 她下轮还惦记"没给我看"（明明看了！）→ 发图片路径也算兑现
+        _save_json(PROMISE_FILE, None)
         return None
     promise["reminded"] = promise.get("reminded", 0) + 1
     if promise["reminded"] >= 2:

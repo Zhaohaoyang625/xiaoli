@@ -458,6 +458,21 @@ class TestO6WorkingMemory(unittest.TestCase):
         p = proactive._load_json(proactive.PROMISE_FILE, None)
         self.assertIn("文件", p["content"])
 
+    def test_sending_photo_fulfills(self):
+        """承诺"给你看照片"→ 他真发图片路径 → 兑现清槽（路径里没有"照片"两字，
+        2026-08-23 修复：按关键词判不到 → 加图片路径检测）"""
+        proactive.promise_scan("待会给你看照片")
+        # 造一张临时图片，路径当用户输入
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            f.write(b"\xff\xd8x")
+            img = f.name
+        try:
+            self.assertIsNone(proactive.promise_hint(img))
+            self.assertIsNone(proactive._load_json(proactive.PROMISE_FILE, None))
+        finally:
+            os.remove(img)
+
 
 class TestO7InterruptResume(unittest.TestCase):
     """打断续说：被打断时没说完的话记进 _unfinished"""
