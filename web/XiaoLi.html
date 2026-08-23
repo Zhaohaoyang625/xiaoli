@@ -701,7 +701,8 @@ function loadChatlog() {
       const body = document.getElementById("chatlogBody");
       body.innerHTML = msgs.map(m =>
         '<div class="msg ' + (m.role === "user" ? "user" : "assistant") + '">' +
-        '<div class="bubble" title="' + escHtml(m.time) + '">' + escHtml(m.content) + "</div></div>"
+        '<div class="bubble" title="' + escHtml(m.time) + '">' +
+        escHtml(m.content.replace(/^【图片】/, "📷 ")) + "</div></div>"  // 照片消息友好显示
       ).join("");
       body.scrollTop = body.scrollHeight;  // 始终滚到最新一条
     })

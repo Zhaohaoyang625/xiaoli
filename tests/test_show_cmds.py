@@ -76,5 +76,22 @@ class TestShowHeart(unittest.TestCase):
         self.assertIn("60", out)    # affection 默认
 
 
+class TestShowBrief(unittest.TestCase):
+    def _run(self, brief_text):
+        out = io.StringIO()
+        with mock.patch.object(chat_mod.world_brief, "load_brief_injection",
+                               return_value=brief_text), redirect_stdout(out):
+            chat_mod._show_brief()
+        return out.getvalue()
+
+    def test_prints_brief_text(self):
+        out = self._run("今天的热搜：台湾各地高温。")
+        self.assertIn("台湾各地高温", out)
+
+    def test_empty_brief_friendly_hint(self):
+        out = self._run("")
+        self.assertIn("还没刷到世界新闻", out)
+
+
 if __name__ == "__main__":
     unittest.main()

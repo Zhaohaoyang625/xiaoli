@@ -537,6 +537,17 @@ def _show_heart():
         print(f"    因为：{c}")
 
 
+def _show_brief():
+    """终端「简报」：她今天知道的世界（只读本地文件，不联网不花钱）"""
+    print("  ── 她今天知道的世界 ──")
+    text = world_brief.load_brief_injection()
+    if text.strip():
+        print(f"  {text.strip()}")
+    else:
+        print("  （她今天还没刷到世界新闻，等她自己刷到就会知道了）")
+    print("  ──────────────")
+
+
 def handle_photo(path):
     """看照片（2026-08-23，视觉模型）：他发图片路径 → 她"看"了再回应。
     不经过文本大脑（一个调用搞定，单张 ~0.0012 元）；
@@ -966,6 +977,9 @@ def main():
                 continue
             if user_input in ("心情", "好感", "查心情"):
                 _show_heart()
+                continue
+            if user_input in ("简报", "世界简报", "看简报"):
+                _show_brief()
                 continue
             # 语音输入：输入"说"开始录音 → 火山识别成文字 → 当作你说了这句话
             if user_input in ("说", "语音说", "声控"):
