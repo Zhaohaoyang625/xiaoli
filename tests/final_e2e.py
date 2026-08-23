@@ -140,6 +140,10 @@ print("#" * 56)
 print()
 print("【场景1】早上8点，她先开口（B.2 节奏窗口→主动回合）")
 chat.handle_event("节奏", "现在是早安时间，你主动开口", "08:00")
+if len(diary["messages"]) < 1:
+    # 她偶尔会选"安静陪着你"（v2 P3 显式静默，合法行为，LLM 随机）→ 再给一次机会
+    print("  （她这轮选了安静…再试一次）")
+    chat.handle_event("节奏", "现在是早安时间，你主动开口", "08:01")
 check("她主动说早安", len(diary["messages"]) >= 1)
 
 print()

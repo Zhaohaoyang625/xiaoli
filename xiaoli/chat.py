@@ -660,6 +660,41 @@ class WebBridge(http.server.BaseHTTPRequestHandler):
         else:
             self._json({"ok": False}, 404)
 
+    def do_POST(self):
+        """网页传照片（2026-08-23）：文件存 data/inbox/，路径进输入队列 → 她看照片。
+        鉴权同 GET（token 在查询串），魔数校验防垃圾文件"""
+        import urllib.parse as _up
+        qs = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+        if not _bridge_token or qs.get("token", [""])[0] != _bridge_token:
+            self._json({"ok": False, "error": "forbidden"}, 403)
+            return
+        if self.path.split("?")[0] != "/photo":
+            self._json({"ok": False}, 404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length <= 0 or length > 20 * 1024 * 1024:  # 和 vision 的 20MB 上限一致
+                self._json({"ok": False, "error": "照片太大（最多 20MB）"}, 413)
+                return
+            body = self.rfile.read(length)
+            # 魔数校验（不信任 Content-Type）：jpg/png/gif/webp
+            _magic = [(b"\xff\xd8", ".jpg"), (b"\x89PNG", ".png"),
+                      (b"GIF8", ".gif"), (b"RIFF", ".webp")]
+            ext = next((e for m, e in _magic if body[:4].startswith(m)), None)
+            if ext is None:
+                self._json({"ok": False, "error": "只支持 jpg/png/gif/webp 图片"}, 400)
+                return
+            inbox = os.path.join(paths.DATA_DIR, "inbox")
+            os.makedirs(inbox, exist_ok=True)
+            fpath = os.path.join(
+                inbox, f"photo_{time.strftime('%H%M%S')}_{secrets.token_hex(3)}{ext}")
+            with open(fpath, "wb") as f:
+                f.write(body)
+            input_queue.put(("web", fpath))
+            self._json({"ok": True})
+        except Exception as e:
+            self._json({"ok": False, "error": str(e)}, 500)
+
     def _json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -681,6 +716,16 @@ class WebBridge(http.server.BaseHTTPRequestHandler):
 def start_web_bridge():
     """启动网页桥服务（127.0.0.1:8800）。端口被占也不影响聊天"""
     try:
+        # 清理 data/inbox/ 里 7 天前的照片（传照片用的临时收件箱）
+        inbox = os.path.join(paths.DATA_DIR, "inbox")
+        if os.path.isdir(inbox):
+            for name in os.listdir(inbox):
+                p = os.path.join(inbox, name)
+                try:
+                    if time.time() - os.path.getmtime(p) > 7 * 86400:
+                        os.remove(p)
+                except OSError:
+                    pass
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 8800), WebBridge)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         print("  🌐 网页语音已就绪：浏览器打开 XiaoLi.html，点🎤按钮直接说话")
@@ -703,6 +748,22 @@ def main():
     print("  输入 exit 或 再见 退出；语音开/语音关 切换声音；通话开/通话关 免按键对话")
     if voice_on:
         print("  🔊 语音模式：她说的话会念出来（台湾腔）")
+    # 启动自检（2026-08-23）：一眼看出什么没配好（只看配置和文件，不加载模型）
+    # 用 [OK]/[!!] 不用 emoji——GBK 终端打印 emoji 会 UnicodeEncodeError 崩掉
+    def _mark(ok_):
+        return "[OK]" if ok_ else "[!!]"
+    print("  ── 启动自检 ──")
+    print(f"  {_mark(bool(config.DEEPSEEK_API_KEY))} 大脑（DeepSeek key）" + (
+        " ← 没配！先跑 python scripts/setup_keys.py --set deepseek" if not config.DEEPSEEK_API_KEY else ""))
+    print(f"  {_mark(bool(config.VOLC_API_KEY))} 火山语音（备用音色）" + (
+        " ← 没配就用 edge 晓晓（普通话，非台湾腔）" if not config.VOLC_API_KEY else ""))
+    print(f"  {_mark(bool(voice_on))} 语音模式" + (
+        " ← 没开 --voice 她只有文字不开口（python chat.py --voice）" if not voice_on else ""))
+    print(f"  {_mark(os.path.isdir(tts_local._MODEL_DIR))} 本地克隆声音" + (
+        " ← models/Qwen3-TTS 没下载，语音走火山/edge" if not os.path.isdir(tts_local._MODEL_DIR) else ""))
+    print(f"  {_mark(os.path.isdir(whisper_stt._MODEL_PATH))} 本地识别" + (
+        " ← models/faster-whisper 没下载，「说」走火山识别" if not os.path.isdir(whisper_stt._MODEL_PATH) else ""))
+    print("  ────────────")
     # 本地识别/合成预热（2026-08-22）：后台加载 whisper + Qwen3-TTS 模型（各≈10-20秒），
     # 第一次说话前就绪——不预热的话第一次开口/开口要等加载（降级火山兜底）
     whisper_stt.preload()
@@ -823,9 +884,15 @@ def main():
         # 看照片（2026-08-23，视觉模型）：他发图片路径 → 她"看"了再回应，
         # 不经过文本大脑（一个调用搞定，单张 ~0.0012 元）
         if vision.is_photo_path(user_input):
-            _see = vision.look_at_photo(user_input)
+            print("  📷（她凑过来看照片…）")
+            _see, _photo_memory = vision.look_at_photo(user_input)
             if not _see:
                 _see = "齁…这张照片人家打不开捏，你换个图试试？"
+            # 照片里值得记住的事 → 写档案（她记得"你给她看过什么"，下次能接上）
+            if _photo_memory:
+                memory_mod.merge_fact(facts, f"他给我看过一张照片，里面：{_photo_memory}",
+                                      importance=5, category="看过的照片")
+                memory_mod.save_facts(facts)
             print("\n" + "=" * 30)
             say_with_continuation("", "", _see, ())
             print("=" * 30)

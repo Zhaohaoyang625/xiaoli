@@ -7,6 +7,7 @@
 # ============================================
 
 import base64
+import json
 import os
 
 from xiaoli import config, llm
@@ -21,7 +22,9 @@ _VISION_SYSTEM = """你是小李，一个台湾女孩，正在和男朋友聊天
 ① 第一反应真实自然：惊喜、好奇、心动、吐槽都行（自拍要夸他，风景/食物/宠物就聊照片本身）
 ② 回应后追问一两个细节（在哪拍的？这是谁呀？）——让对话能继续
 ③ 繁体中文，口语化，台湾腔，一两句话就好，别做作、别客套、别书面语
-④ 如果照片里有人：你可以好奇地问"这是谁"，但不要用"图片中的女性很漂亮"这类机器人话术"""
+④ 如果照片里有人：你可以好奇地问"这是谁"，但不要用"图片中的女性很漂亮"这类机器人话术
+输出格式（严格 JSON，只输出 JSON，不要别的）：
+{"reply": "你对他说的话", "memory": "值得记住的一件事（他新养的猫/他换了新发型/他去了哪…没有值得记的就填空字符串）"}"""
 
 
 def is_photo_path(text):
@@ -41,11 +44,12 @@ def _mime_fmt(path):
 
 
 def look_at_photo(path):
-    """她看一张照片，返回她的回应（繁体中文一段话）；任何失败 → None。
+    """她看一张照片，返回 (reply, memory)；任何失败 → (None, "")。
+    reply=她的话（繁体中文一段话）；memory=值得记住的一件事（没有 = ""）。
     图片 base64 内联（OpenAI 兼容格式），走统一 client（C1 超时）。"""
     try:
         if os.path.getsize(path) > _MAX_BYTES:
-            return None
+            return None, ""
         with open(path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
         client = llm.get_client()
@@ -59,13 +63,24 @@ def look_at_photo(path):
                         "url": f"data:image/{_mime_fmt(path)};base64,{b64}"}},
                 ]},
             ],
-            max_tokens=128,
+            max_tokens=200,
             # 实测坑（2026-08-23）：视觉模型默认开思考模式 → max_tokens 全被
             # reasoning 吃掉 → content 返回空。看照片要快，强制关思考
             # （禁用思考时 temperature 无效，所以也不发了）
             extra_body={"thinking": {"type": "disabled"}},
         )
         text = (resp.choices[0].message.content or "").strip()
-        return text or None
+        if not text:
+            return None, ""
+        # 解析 JSON（模型可能加 ``` 围栏/前后废话 → 截取第一个 { 到最后一个 }）
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                data = json.loads(text[start:end + 1])
+                return (data.get("reply") or "").strip() or None, \
+                       (data.get("memory") or "").strip()
+            except (ValueError, json.JSONDecodeError):
+                pass
+        return text, ""  # 兜底：整体当她说的话
     except Exception:
-        return None
+        return None, ""

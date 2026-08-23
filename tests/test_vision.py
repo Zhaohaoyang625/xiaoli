@@ -6,10 +6,12 @@
 
 import base64
 import os
+import queue
 import tempfile
 import unittest
 from unittest import mock
 
+from xiaoli import chat as chat_mod  # WebBridge 端点测试用
 from xiaoli import config, llm, vision
 
 
@@ -50,37 +52,73 @@ class TestIsPhotoPath(unittest.TestCase):
 
 
 class TestLookAtPhoto(unittest.TestCase):
-    def _fake_client(self, reply="哇！这猫猫好可爱喔～你在哪拍的呀？"):
+    def _fake_client(self, reply='{"reply": "哇！这猫猫好可爱喔～你在哪拍的呀？", "memory": "他的猫是橘猫"}',
+                     content=None):
         fake_resp = mock.Mock()
         fake_resp.choices = [mock.Mock()]  # choices 是真实列表才能下标
-        fake_resp.choices[0].message.content = reply
+        fake_resp.choices[0].message.content = content if content is not None else reply
         client = mock.Mock()
         client.chat.completions.create.return_value = fake_resp
         return client
 
+    def _make_img(self, suffix=".jpg", data=b"\xff\xd8fake-jpeg-bytes"):
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(data)
+            path = f.name
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
     def test_sends_vision_model_with_base64(self):
         """格式验证：视觉模型 + content 数组（text + image_url data URL，base64 正确）"""
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-            f.write(b"\xff\xd8fake-jpeg-bytes")
-            path = f.name
-        try:
-            client = self._fake_client()
-            with mock.patch.object(llm, "get_client", return_value=client):
-                reply = vision.look_at_photo(path)
-            self.assertEqual(reply, "哇！这猫猫好可爱喔～你在哪拍的呀？")
-            call = client.chat.completions.create.call_args
-            kwargs = call.kwargs
-            self.assertEqual(kwargs["model"], config.DEEPSEEK_VISION_MODEL)
-            content = kwargs["messages"][1]["content"]
-            self.assertIsInstance(content, list)
-            self.assertEqual(content[0]["type"], "text")
-            self.assertEqual(content[1]["type"], "image_url")
-            url = content[1]["image_url"]["url"]
-            self.assertTrue(url.startswith("data:image/jpeg;base64,"))
-            self.assertEqual(base64.b64decode(url.split(",", 1)[1]), b"\xff\xd8fake-jpeg-bytes")
-            self.assertEqual(kwargs["messages"][0]["role"], "system")
-        finally:
-            os.remove(path)
+        path = self._make_img()
+        client = self._fake_client()
+        with mock.patch.object(llm, "get_client", return_value=client):
+            reply, memory = vision.look_at_photo(path)
+        self.assertEqual(reply, "哇！这猫猫好可爱喔～你在哪拍的呀？")
+        self.assertEqual(memory, "他的猫是橘猫")
+        call = client.chat.completions.create.call_args
+        kwargs = call.kwargs
+        self.assertEqual(kwargs["model"], config.DEEPSEEK_VISION_MODEL)
+        content = kwargs["messages"][1]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[0]["type"], "text")
+        self.assertEqual(content[1]["type"], "image_url")
+        url = content[1]["image_url"]["url"]
+        self.assertTrue(url.startswith("data:image/jpeg;base64,"))
+        self.assertEqual(base64.b64decode(url.split(",", 1)[1]), b"\xff\xd8fake-jpeg-bytes")
+        self.assertEqual(kwargs["messages"][0]["role"], "system")
+
+    def test_empty_memory(self):
+        """memory 空字符串 → ("", 不写记忆)"""
+        path = self._make_img()
+        client = self._fake_client(content='{"reply": "好美的海！", "memory": ""}')
+        with mock.patch.object(llm, "get_client", return_value=client):
+            reply, memory = vision.look_at_photo(path)
+        self.assertEqual((reply, memory), ("好美的海！", ""))
+
+    def test_fenced_json(self):
+        """模型带 ``` 围栏 → 截取 {..} 解析"""
+        path = self._make_img()
+        client = self._fake_client(
+            content='```json\n{"reply": "这是哪里呀？", "memory": "他去了海边"}\n```')
+        with mock.patch.object(llm, "get_client", return_value=client):
+            reply, memory = vision.look_at_photo(path)
+        self.assertEqual((reply, memory), ("这是哪里呀？", "他去了海边"))
+
+    def test_bad_json_fallback_to_plain_text(self):
+        """模型没按 JSON 输出 → 整体当她的话，无记忆"""
+        path = self._make_img()
+        client = self._fake_client(content="哇这也太可爱了吧！")
+        with mock.patch.object(llm, "get_client", return_value=client):
+            reply, memory = vision.look_at_photo(path)
+        self.assertEqual((reply, memory), ("哇这也太可爱了吧！", ""))
+
+    def test_empty_content_none(self):
+        path = self._make_img()
+        client = self._fake_client(content="   ")
+        with mock.patch.object(llm, "get_client", return_value=client):
+            reply, memory = vision.look_at_photo(path)
+        self.assertIsNone(reply)
 
     def test_mime_map(self):
         self.assertEqual(vision._mime_fmt("a.jpg"), "jpeg")
@@ -89,27 +127,99 @@ class TestLookAtPhoto(unittest.TestCase):
         self.assertEqual(vision._mime_fmt("x.gif"), "gif")
 
     def test_api_failure_returns_none(self):
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            f.write(b"\x89PNG fake")
-            path = f.name
-        try:
-            client = mock.Mock()
-            client.chat.completions.create.side_effect = RuntimeError("网络炸了")
-            with mock.patch.object(llm, "get_client", return_value=client):
-                self.assertIsNone(vision.look_at_photo(path))
-        finally:
-            os.remove(path)
+        path = self._make_img(suffix=".png", data=b"\x89PNG fake")
+        client = mock.Mock()
+        client.chat.completions.create.side_effect = RuntimeError("网络炸了")
+        with mock.patch.object(llm, "get_client", return_value=client):
+            reply, memory = vision.look_at_photo(path)
+        self.assertIsNone(reply)
+        self.assertEqual(memory, "")
 
     def test_huge_file_rejected(self):
         """超 20MB → None（不白花钱传大文件）"""
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-            f.write(b"\xff\xd8" * (11 * 1024 * 1024))  # 22MB
-            path = f.name
-        try:
-            with mock.patch.object(llm, "get_client", side_effect=AssertionError("不该调用")):
-                self.assertIsNone(vision.look_at_photo(path))
-        finally:
-            os.remove(path)
+        path = self._make_img(data=b"\xff\xd8" * (11 * 1024 * 1024))  # 22MB
+        with mock.patch.object(llm, "get_client", side_effect=AssertionError("不该调用")):
+            reply, memory = vision.look_at_photo(path)
+        self.assertIsNone(reply)
+        self.assertEqual(memory, "")
+
+
+class TestPhotoEndpoint(unittest.TestCase):
+    """WebBridge /photo 端点：鉴权 + 魔数校验 + 存收件箱 + 进输入队列"""
+
+    def _handler(self, body=b"", ct="image/jpeg"):
+        h = chat_mod.WebBridge.__new__(chat_mod.WebBridge)
+        h.path = "/photo?token=secret123"
+        h.headers = {"Content-Length": str(len(body)), "Content-Type": ct}
+        h.rfile = mock.Mock()
+        h.rfile.read.return_value = body
+        return h
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        p = mock.patch.object(chat_mod.paths, "DATA_DIR", self.tmp)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_no_token_forbidden(self):
+        h = self._handler(b"x")
+        h.path = "/photo"  # 无 token
+        with mock.patch.object(chat_mod, "_bridge_token", "secret123"):
+            resp = {}
+            with mock.patch.object(chat_mod.WebBridge, "_json",
+                                   side_effect=lambda d, c=200: resp.update({"body": d, "code": c})):
+                chat_mod.WebBridge.do_POST(h)
+        self.assertEqual(resp["code"], 403)
+
+    def test_bad_magic_rejected(self):
+        """不是真图片（文本内容）→ 400"""
+        h = self._handler(b"hello world, this is not an image")
+        with mock.patch.object(chat_mod, "_bridge_token", "secret123"):
+            resp = {}
+            with mock.patch.object(chat_mod.WebBridge, "_json",
+                                   side_effect=lambda d, c=200: resp.update({"body": d, "code": c})):
+                chat_mod.WebBridge.do_POST(h)
+        self.assertEqual(resp["code"], 400)
+
+    def test_too_large_rejected(self):
+        h = self._handler(b"\xff\xd8" * 100)
+        h.headers = {"Content-Length": str(21 * 1024 * 1024), "Content-Type": "image/jpeg"}
+        with mock.patch.object(chat_mod, "_bridge_token", "secret123"):
+            resp = {}
+            with mock.patch.object(chat_mod.WebBridge, "_json",
+                                   side_effect=lambda d, c=200: resp.update({"body": d, "code": c})):
+                chat_mod.WebBridge.do_POST(h)
+        self.assertEqual(resp["code"], 413)
+
+    def test_photo_saved_and_queued(self):
+        """正常照片 → 存进 data/inbox/ + 路径进输入队列（主循环 vision 分支自然处理）"""
+        h = self._handler(b"\xff\xd8real-jpeg")
+        q = queue.Queue()
+        with mock.patch.object(chat_mod, "_bridge_token", "secret123"), \
+             mock.patch.object(chat_mod, "input_queue", q):
+            resp = {}
+            with mock.patch.object(chat_mod.WebBridge, "_json",
+                                   side_effect=lambda d, c=200: resp.update({"body": d, "code": c})):
+                chat_mod.WebBridge.do_POST(h)
+        self.assertTrue(resp["body"]["ok"])
+        src, path = q.get_nowait()
+        self.assertEqual(src, "web")
+        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(path.startswith(os.path.join(self.tmp, "inbox")))
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"\xff\xd8real-jpeg")
+        os.remove(path)
+
+    def test_png_ext_by_magic(self):
+        h = self._handler(b"\x89PNG\r\n\x1a\nfake", ct="image/png")
+        q = queue.Queue()
+        with mock.patch.object(chat_mod, "_bridge_token", "secret123"), \
+             mock.patch.object(chat_mod, "input_queue", q):
+            with mock.patch.object(chat_mod.WebBridge, "_json"):
+                chat_mod.WebBridge.do_POST(h)
+        _, path = q.get_nowait()
+        self.assertTrue(path.endswith(".png"))
+        os.remove(path)
 
 
 if __name__ == "__main__":

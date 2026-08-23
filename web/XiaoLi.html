@@ -192,6 +192,8 @@
       <button class="talkbtn small" id="rememberBtn" title="把你刚说的这句话牢牢记下来（她不会忘）">📌 记住这句</button>
       <button class="talkbtn small" id="callBtn" title="免按键对话：麦克风常开，你直接说话她就回（她要你等她说完）">📞 通话：关</button>
       <button class="talkbtn small" id="faceDemoBtn" title="看她做各种表情（每2.5秒换一个，再点一次停止）">😊 看表情</button>
+      <button class="talkbtn small" id="photoBtn" title="给她看张照片（自拍/猫猫/风景都行，她会像真人一样夸你/追问）">📷 传照片</button>
+      <input type="file" id="photoInput" accept="image/*" style="display:none">
     </div>
     <div id="talkStatus"></div>
   </div>
@@ -346,6 +348,29 @@ document.getElementById("rememberBtn").addEventListener("click", () => {
       setTimeout(() => { btn.textContent = "📌 记住这句"; }, 2500);
     })
     .catch(() => { btn.textContent = "⚠️ 连不上"; setTimeout(() => { btn.textContent = "📌 记住这句"; }, 2000); });
+});
+
+// 📷 传照片（2026-08-23）：选图片 → 上传本地桥 → 她"看"了回应（视觉模型）
+document.getElementById("photoBtn").addEventListener("click", () => {
+  document.getElementById("photoInput").click();
+});
+document.getElementById("photoInput").addEventListener("change", () => {
+  const f = document.getElementById("photoInput").files[0];
+  if (!f) return;
+  if (f.size > 20 * 1024 * 1024) {
+    status.textContent = "📷 这张太大啦（最多 20MB）";
+    return;
+  }
+  const fd = new FormData();
+  fd.append("photo", f);
+  status.textContent = "📷 她在看照片…";
+  fetch(BRIDGE + "/photo" + BRIDGE_TOKEN(), { method: "POST", body: fd })
+    .then(r => r.json())
+    .then(d => {
+      status.textContent = d.ok ? "📷 她看到照片了！" : "📷 传送失败：" + (d.error || "未知错误");
+    })
+    .catch(() => { status.textContent = "📷 传送失败：连不上本地桥"; })
+    .finally(() => { document.getElementById("photoInput").value = ""; });
 });
 
 // 📞 通话模式（v2 O2）：免按键对话开关（麦克风常开，你说她就回）
