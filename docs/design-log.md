@@ -385,3 +385,7 @@
 
 ## AI. handle_photo 抽函数（2026-08-23 12:5x，重构收尾）
 照片分支从主循环抽出 `handle_photo(path)`（chat.py，main() 已 global diary/facts，函数直接引用模块级）——行为零变化，换来 4 项单测（日记两条含"【图片】痕迹不存内容"/记忆写入 importance=5/无记忆不写/视觉失败兜底话照说照记）。照片全链路（端点/解析/主逻辑）至此全部有测试保护。305 全绿。
+
+## AJ. 启动备份提醒 + README 命令修正（2026-08-23 午，311 全绿）
+- **抓到一个文档 bug**：README 写 `python chat.py --voice`，但根目录根本没有 chat.py（入口是 `python -m xiaoli.chat --voice`，start.bat 一直是对的）——小白照 README 敲必报错。修 README + 启动自检第 6 行提示文字同步。
+- `_backup_due(days=7)`（chat.py）：启动自检新增「数据备份」行——backups/ 无 zip 或最新备份超 7 天 → [!!] 提醒跑 scripts/backup.py。数据（聊天记录/记忆/她的心）是无价的，丢了找不回。6 项单测（无目录/空目录/新备份/8 天前/非 zip 干扰/多备份取最新）。

@@ -1,0 +1,65 @@
+# ============================================
+# 启动备份提醒 _backup_due 单测（2026-08-23）
+# 数据是无价的：超过 7 天没备份，启动自检要提醒跑 scripts/backup.py
+# ============================================
+
+import os
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+from xiaoli import chat
+
+
+class TestBackupDue(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        p = mock.patch.object(chat.paths, "ROOT", self.tmp)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _make_backup(self, age_days):
+        """造一个 mtime 为 age_days 天前的备份 zip"""
+        d = os.path.join(self.tmp, "backups")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, "backup_old.zip")
+        with open(p, "wb") as f:
+            f.write(b"fake")
+        old = time.time() - age_days * 86400
+        os.utime(p, (old, old))
+        return p
+
+    def test_no_backup_dir_means_due(self):
+        """从没备份过 → 到期（要提醒）"""
+        self.assertTrue(chat._backup_due())
+
+    def test_empty_backup_dir_means_due(self):
+        os.makedirs(os.path.join(self.tmp, "backups"))
+        self.assertTrue(chat._backup_due())
+
+    def test_fresh_backup_not_due(self):
+        self._make_backup(age_days=1)
+        self.assertFalse(chat._backup_due())
+
+    def test_old_backup_due(self):
+        self._make_backup(age_days=8)
+        self.assertTrue(chat._backup_due())
+
+    def test_ignores_non_zip_files(self):
+        """backups/ 里只有别的文件（不算备份）→ 到期"""
+        d = os.path.join(self.tmp, "backups")
+        os.makedirs(d)
+        with open(os.path.join(d, "note.txt"), "w") as f:
+            f.write("hi")
+        self.assertTrue(chat._backup_due())
+
+    def test_newest_zip_wins(self):
+        """多个备份取最新的那个"""
+        self._make_backup(age_days=10)
+        self._make_backup(age_days=1)
+        self.assertFalse(chat._backup_due())
+
+
+if __name__ == "__main__":
+    unittest.main()

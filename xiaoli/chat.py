@@ -490,6 +490,19 @@ def proactive_talk(event_type, content, recall_lines=""):
         return ""
 
 
+def _backup_due(days=7):
+    """启动提醒：最近一次备份是否已超过 days 天。
+    backups/ 里找最新 .zip 的修改时间；没有备份也算到期（数据是无价的）。"""
+    backup_dir = os.path.join(paths.ROOT, "backups")
+    if not os.path.isdir(backup_dir):
+        return True
+    newest = 0.0
+    for name in os.listdir(backup_dir):
+        if name.endswith(".zip"):
+            newest = max(newest, os.path.getmtime(os.path.join(backup_dir, name)))
+    return time.time() - newest > days * 86400
+
+
 def handle_photo(path):
     """看照片（2026-08-23，视觉模型）：他发图片路径 → 她"看"了再回应。
     不经过文本大脑（一个调用搞定，单张 ~0.0012 元）；
@@ -786,11 +799,13 @@ def main():
     print(f"  {_mark(bool(config.VOLC_API_KEY))} 火山语音（备用音色）" + (
         " ← 没配就用 edge 晓晓（普通话，非台湾腔）" if not config.VOLC_API_KEY else ""))
     print(f"  {_mark(bool(voice_on))} 语音模式" + (
-        " ← 没开 --voice 她只有文字不开口（python chat.py --voice）" if not voice_on else ""))
+        " ← 没开 --voice 她只有文字不开口（python -m xiaoli.chat --voice）" if not voice_on else ""))
     print(f"  {_mark(os.path.isdir(tts_local._MODEL_DIR))} 本地克隆声音" + (
         " ← models/Qwen3-TTS 没下载，语音走火山/edge" if not os.path.isdir(tts_local._MODEL_DIR) else ""))
     print(f"  {_mark(os.path.isdir(whisper_stt._MODEL_PATH))} 本地识别" + (
         " ← models/faster-whisper 没下载，「说」走火山识别" if not os.path.isdir(whisper_stt._MODEL_PATH) else ""))
+    print(f"  {_mark(not _backup_due())} 数据备份" + (
+        " ← 超过 7 天没备份了，跑 python scripts/backup.py 保护聊天记录" if _backup_due() else ""))
     print("  ────────────")
     # 本地识别/合成预热（2026-08-22）：后台加载 whisper + Qwen3-TTS 模型（各≈10-20秒），
     # 第一次说话前就绪——不预热的话第一次开口/开口要等加载（降级火山兜底）
