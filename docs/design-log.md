@@ -364,3 +364,15 @@
 
 ## AC. 成本组 C1/C2（2026-08-23，月费 ¥90→¥15 的头号杠杆）
 **C2 缓存前缀重排**：DeepSeek/OpenAI 缓存机制=前缀从第 0 token 完全匹配才命中。旧工作台把【现在的时间和日期】（每分钟变）插在 persona 后第 2 位 → 摘要+60 轮历史永远命中不了缓存，整段每次重算。**新顺序：persona（静态）→ 摘要/回顾/情绪线（压缩或每天才变）→ 历史（追加式）→ 世界简报/生活日历（每天变）→ 时间戳（每分钟变，放最末）→ user 输入**。月费差距约 6 倍。**C1 统一超时**：13 处各自 new OpenAI() 全用 SDK 默认 600s（断网挂 10 分钟卡死主循环）→ 新建 xiaoli/llm.py 统一 get_client()（httpx.Timeout connect=5/read=30），13 处替换（chat×4/context×5/sing×1/world_brief×1/judge_eval×1/test_search×1），各调用点兜底链（重试/降级/静默）不变，超时后对话不断。测试 patch 目标 25 处从模块 OpenAI 类改 xiaoli.llm.get_client（sed 批量）。**教训**：改 import 时误删 sing.py 的 `from xiaoli import config` → _announce 里 config.DEEPSEEK_MODEL 抛 NameError 被 except 吞掉 → 测试静默走兜底分支（报"歌名不匹配"假象）——调试时手动跟踪 mock 链发现 mock 生效但结果不对，揪出 NameError。**+6 项测试（test_cost.py：跨分钟前缀逐条一致/时间戳贴 user 前/动态块在历史后/静态头保留/超时配置）；265 项全绿**。
+
+## AD. <pause/> 停顿标签（2026-08-23，真人感研究点名项，学自 OLLVT [pause]）
+"停顿由她决定"比固定停顿自然：persona 教她"想停顿（深吸一口气/要强调前/说完愣一下）就在句尾写 <pause/>，一天一两次"，程序转 0.8s 静音（<pause:1.5> 可指定秒数，钳制 0.3~2.5s）。**实现三层**：①`_protect_pauses` 在 speakable（剥尖括号）之前把标签转明文占位——**坑：占位符不能带小数点（speakable 符号过滤会删 `.`，PAUSEHOLD1.5 变 15 → 15s 被钳 2.5s）→ 改毫秒整数 PAUSEHOLD1500**；②`_synth_worker` 逐句解析占位 → 干净句照常合成，句后插静音段入队（`_silence_pcm` 24k int16 零 PCM，播放线程当普通音频播，衔接自然）；纯停顿尾句（"齁～好想你。<pause/>" 切句切出 "PAUSEHOLD"）只停不播；口型时间戳把停顿算进去（她停顿时长嘴巴状态保持）；③显示层 `_strip_pause_tags` 剥标签（chat.py 显示文本不露指令）。测试 11 项（含管线级：mock 三层合成验证句子音频后接静音段、纯停顿句、无标签不插静音）；**测试污染教训：管线测试替换 voice._tts_queue 全局不恢复 → test_v2 说话标志测试被带崩（单独跑全绿、全量跑挂）→ setUp/tearDown 保存恢复全局**。279 项全绿。
+
+## AC 补充（2026-08-23）C3 提醒重试瘦身
+提醒补写重试原来 `retry = list(messages)` 全量 60 轮重发（最坏 4 倍调用，且【强制要求】插第 1 位破坏缓存前缀）→ `_thin_for_retry`（chat.py）：system 块（人设/记忆/动态区）全保留 + 对话历史只留最近 RETRY_KEEP_ROUNDS=10 轮 + 当前输入必在最后（防重复）；历史短于 10 条不裁剪原样返回。约 ~1.5 倍调用。3 项测试。
+
+## AE. 记忆频率 M7 + 防镜像/摘要守卫排查结论（2026-08-23，短时优化收官）
+**M7 记忆频率（间隔重复原理）**：被想起得多的记忆忘得慢——`recallCount` 字段（merge_fact 新建=0，recall 命中 top 的 +1），`half_life_hours` 乘 `min(2.0, 1.15**recallCount)`（每次召回 ×1.15，≈5 次封顶 ×2）。语义："他常提的事"自然记得更久，一次没提过的按原曲线；排序分不加频率（避免锁死——相关度权重保证新话题上位）。**防镜像排查结论：无真实风险**——历史数据 15 条"镜像"全是旧存储格式（原始 JSON 字符串带时间戳前缀），当前链已双层防护（v2 T3 时间戳只加 user 侧 + parse_reply 剥时间戳前缀），不做扁平化。**摘要守卫判断：不需要**——compress 三处调用（chat.py 410/542/1020）全在 `diary_lock` 内同步执行，主线程阻塞期新消息不可能进 diary，isContextChanged 丢弃重来是异步架构的需求，这里天然免疫。+4 项测试；283 项全绿。
+
+## AF. 看照片（DeepSeek 视觉模型 deepseek-v4-flash-vision-exp，2026-08-23）
+8-21 刚上线的视觉模型：单张 ≤384 tokens（~0.0012 元），走 OpenAI 兼容 chat.completions（现有 llm.get_client 直接可用，零新依赖）。**vision.py**：`is_photo_path`（终端拖入路径/剥引号/存在性/扩展名白名单 jpg jpeg png gif webp）+ `look_at_photo`（base64 内联 data URL → content 数组格式 → 她以小李口吻回应 1~2 句并追问细节；20MB 上限防误发；任何失败 → None → 兜底"打不开捏"）。**chat.py 主循环**：检测到图片路径 → 独立分支（不经过文本大脑）→ say_with_continuation 显示+语音 → 日记记"【图片】他发了一张照片"痕迹（不存照片内容=隐私+噪音）+ 她的回应 → continue。**实测坑（真 API 冒烟抓出）**：视觉模型默认开思考模式 → max_tokens=128 全被 reasoning 吃掉 → content 返回空（finish=length）→ 必须 `extra_body={"thinking": {"type": "disabled"}}`（禁用时 temperature 无效也别发）。修后真实冒烟：她看 Shizuku 贴图回"這張拼貼也太可愛了吧！是你要做什麼動畫人物喔？藍色眼睛超萌的，你是打算幫我畫一個專屬頭像嗎～"——台湾腔+会追问。+9 项测试；291 项全绿 + e2e 17 项（真 API，偶发静默重跑即过）。

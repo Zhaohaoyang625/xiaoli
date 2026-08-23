@@ -31,6 +31,7 @@ from xiaoli import stt
 from xiaoli import whisper_stt  # 本地识别（2026-08-22：0 元/月替代火山，失败自动降级）
 from xiaoli import tts_local  # 本地合成（2026-08-22：Qwen3-TTS 声音克隆，0 元/月替代火山）
 from xiaoli import call_mode  # O2 通话模式（2026-08-22）
+from xiaoli import vision  # 看照片（2026-08-23：DeepSeek 视觉模型，base64 内联）
 from xiaoli.persona import SYSTEM_PROMPT
 
 # 日记/心的写入锁：后台主动消息线程和主聊天线程都写日记，防并发错乱
@@ -818,6 +819,27 @@ def main():
         if temper_event:
             kind, reason = temper_event
             print(f"  {'💔' if kind == 'jealous' else '🕊️'}（她{'吃醋了' if kind == 'jealous' else '被你哄好了'}：{reason}）")
+
+        # 看照片（2026-08-23，视觉模型）：他发图片路径 → 她"看"了再回应，
+        # 不经过文本大脑（一个调用搞定，单张 ~0.0012 元）
+        if vision.is_photo_path(user_input):
+            _see = vision.look_at_photo(user_input)
+            if not _see:
+                _see = "齁…这张照片人家打不开捏，你换个图试试？"
+            print("\n" + "=" * 30)
+            say_with_continuation("", "", _see, ())
+            print("=" * 30)
+            # 记日记：照片不存内容（隐私+噪音），只留痕迹——她记得"看过一张照片"
+            stamp = context.now_str()
+            with diary_lock:
+                diary["messages"].append(
+                    {"role": "user", "content": "【图片】他发了一张照片", "time": stamp})
+                diary["messages"].append(
+                    {"role": "assistant", "content": _see, "time": stamp})
+                context.compress(diary)
+                context.save_diary(diary)
+            proactive.mark_activity()  # 你发照片了，她不用急着找话
+            continue
 
         # v2 E2 安慰阶段推进：用上一轮独立分类器判出的他心情（首轮没有 → 关键词兜底）
         # 他难过 → 探索→共情→行动逐轮推进；他转好 → 结束安慰

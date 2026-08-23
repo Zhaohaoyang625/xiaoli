@@ -187,6 +187,32 @@ class TestM2HalfLife(unittest.TestCase):
         f = {"importance": 5, "valence": "jealous"}
         self.assertAlmostEqual(memory.half_life_hours(f), memory.half_life_hours({"importance": 5}) * 1.5)
 
+    def test_recall_count_extends_half_life(self):
+        """v2 M7 记忆频率：被想起过 → 忘得慢（每次 ×1.15，封顶 ×2）"""
+        base = memory.half_life_hours({"importance": 5})
+        f1 = memory.half_life_hours({"importance": 5, "recallCount": 1})
+        f5 = memory.half_life_hours({"importance": 5, "recallCount": 5})
+        f9 = memory.half_life_hours({"importance": 5, "recallCount": 9})
+        self.assertAlmostEqual(f1, base * 1.15)
+        self.assertAlmostEqual(f5, base * 2.0)  # 1.15^5 ≈ 2.01 → 封顶 2.0
+        self.assertEqual(f9, f5)                # 到顶后不再涨
+
+    def test_recall_increments_count(self):
+        """召回命中的记忆 recallCount +1（旧数据没有字段 → 从 0 起）"""
+        facts = [{"id": "a", "content": "他喜欢猫", "category": "喜好", "importance": 5,
+                  "confidence": 0.8, "createdAt": "2026-08-20 10:00",
+                  "lastRecalled": "2026-08-20 10:00", "valence": "neutral"}]
+        hits = memory.recall(facts, "他喜欢猫")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(facts[0]["recallCount"], 1)
+        hits = memory.recall(facts, "他喜欢猫")
+        self.assertEqual(facts[0]["recallCount"], 2)
+
+    def test_merge_defaults_recall_count_zero(self):
+        facts = []
+        memory.merge_fact(facts, "他喜欢猫")
+        self.assertEqual(facts[0]["recallCount"], 0)
+
     def test_old_fact_still_kept_within_half_lives(self):
         """30 天没提（重要度5→半衰期35天）：没到 5 半衰期 → 保留"""
         old = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M")

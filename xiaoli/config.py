@@ -36,6 +36,10 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 # - 我们选 flash：速度快、成本低，聊天体验合适；deepseek-chat 是旧别名，也能用
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 
+# 视觉模型（2026-08-21 上线）：看照片用（单张最多 384 tokens ≈ 0.0012 元）。
+# 接口同 OpenAI 兼容 chat.completions，图片 base64 内联（vision.py）
+DEEPSEEK_VISION_MODEL = "deepseek-v4-flash-vision-exp"
+
 # ============================================
 # 火山引擎豆包语音（TTS）—— 小李的正式声音
 # 注册：https://console.volcengine.com/auth/signup → 开通"语音技术"

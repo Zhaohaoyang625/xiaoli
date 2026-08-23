@@ -107,6 +107,7 @@ def merge_fact(facts, content, importance=5, category="其他", confidence=0.8, 
         "createdAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "lastRecalled": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "valence": valence,
+        "recallCount": 0,  # v2 记忆频率：被想起的累积次数（召回 +1）
     })
     return True
 
@@ -215,12 +216,16 @@ def _hours_since(dt_str, now):
 
 
 def half_life_hours(fact):
-    """记忆的半衰期（小时，v2 M2/M5，学自 AIRI 无状态遗忘曲线 + MATE 躯体标记）：
+    """记忆的半衰期（小时，v2 M2/M5/M7，学自 AIRI 无状态遗忘曲线 + MATE 躯体标记）：
     重要度决定忘得多快——importance 5 → 35 天，importance 10 → 70 天；
-    高情绪价态的记忆 ×1.5（生气/吃醋/开心的事记得更久）。"""
+    高情绪价态的记忆 ×1.5（生气/吃醋/开心的事记得更久）；
+    频率系数（v2 M7 间隔重复）：被想起过的次数越多 → 忘得越慢——
+    每被召回 1 次半衰期 ×1.15，封顶 ×2（≈5 次后到顶）：
+    "他常提的事"（爱吃烧烤、工作的事）自然记得更久，一次没提过的按原曲线。"""
     h = fact.get("importance", 5) * 7 * 24
     if fact.get("valence") in HIGH_EMOTION_VALENCES:
         h *= 1.5
+    h *= min(2.0, 1.15 ** fact.get("recallCount", 0))
     return h
 
 
@@ -261,6 +266,8 @@ def recall(facts, user_input, top=5, now=None):
     stamp = now.strftime("%Y-%m-%d %H:%M")
     for f in top_hits:
         f["lastRecalled"] = stamp  # 召回回血
+        # v2 M7 记忆频率：被想起 +1（累积"重复接触"，半衰期延长——间隔重复原理）
+        f["recallCount"] = f.get("recallCount", 0) + 1
     return top_hits
 
 
