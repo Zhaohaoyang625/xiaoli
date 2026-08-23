@@ -503,6 +503,40 @@ def _backup_due(days=7):
     return time.time() - newest > days * 86400
 
 
+_MOOD_CN = {  # 终端「心情」显示用（和网页 MOODS 文案保持一致）
+    "happy": "开心", "sad": "难过", "excited": "超兴奋", "anxious": "有点紧张",
+    "content": "满足", "frustrated": "有点小烦躁", "curious": "好奇",
+    "affectionate": "想撒娇", "playful": "想逗你", "flustered": "害羞",
+    "neutral": "平静", "melancholy": "想你了", "jealous": "吃醋", "angry": "真生气",
+}
+
+
+def _show_facts():
+    """终端「记忆」：她记得什么（按重要度取前 15 条）——小白也能随时检查"""
+    fs = sorted(facts, key=lambda f: f.get("importance", 0), reverse=True)[:15]
+    if not fs:
+        print("  （她现在的档案还是空的——多聊聊，她会记住你的事）")
+        return
+    print("  ── 她记得的 ──")
+    for f in fs:
+        cat = f.get("category", "")
+        tag = f"〔{cat}〕" if cat else ""
+        print(f"  ★{f.get('importance', 0)} {tag}{f['content']}")
+    print("  ──────────────")
+
+
+def _show_heart():
+    """终端「心情」：她现在的心（情绪/程度/好感度/原因）"""
+    m = her_heart.get("mood", {})
+    primary = m.get("primary", "neutral")
+    inten = m.get("intensity", 0)
+    a = her_heart.get("affection", 60)
+    name = _MOOD_CN.get(primary, primary)
+    print(f"  （她现在的心情：{name}｜程度 {inten}｜好感度 {a}）")
+    for c in (m.get("causes") or [])[:3]:
+        print(f"    因为：{c}")
+
+
 def handle_photo(path):
     """看照片（2026-08-23，视觉模型）：他发图片路径 → 她"看"了再回应。
     不经过文本大脑（一个调用搞定，单张 ~0.0012 元）；
@@ -917,6 +951,13 @@ def main():
                     _call_mode.start()
                 else:
                     _call_mode.stop()
+                continue
+            # 查看她的心（2026-08-23）：她记得什么 / 她现在什么心情
+            if user_input in ("记忆", "她记得什么", "查记忆"):
+                _show_facts()
+                continue
+            if user_input in ("心情", "好感", "查心情"):
+                _show_heart()
                 continue
             # 语音输入：输入"说"开始录音 → 火山识别成文字 → 当作你说了这句话
             if user_input in ("说", "语音说", "声控"):
