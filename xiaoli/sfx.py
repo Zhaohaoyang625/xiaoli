@@ -31,6 +31,7 @@ _SFX_DIR = os.path.join(paths.DATA_DIR, "sfx")
 # 缓存：名字 → (sample_rate, np.float32 数组)；None = 生成失败（本次不再试）
 _cache = {}
 _lock = threading.Lock()
+_warned = set()  # 已警告过的音效（防刷屏：每轮播放都失败就每轮打印）
 
 
 def _gen_all():
@@ -65,6 +66,11 @@ def _load(name):
                     break
             if not pcm:
                 _cache[name] = None  # 全失败 → 本次静默（下次再试）
+                # 教训（2026-08-23）：拟声失败原来是完全静默的（同 bge 降级坑），
+                # 用户根本不知道清嗓/叹气没了——这里提示一次，不刷屏
+                if name not in _warned:
+                    _warned.add(name)
+                    print(f"  [拟声「{name}」合成失败：火山/edge 都没出声音，本次不再试]")
                 return None
             sr = 24000
             try:

@@ -925,6 +925,10 @@ def main():
     # 用 [OK]/[!!] 不用 emoji——GBK 终端打印 emoji 会 UnicodeEncodeError 崩掉
     def _mark(ok_):
         return "[OK]" if ok_ else "[!!]"
+    def _sfx_ready():
+        """4 个拟声 wav 素材是否都已生成（只看文件，不合成不花钱）"""
+        return all(os.path.exists(os.path.join(sfx._SFX_DIR, n + ".wav"))
+                   for n in sfx._SFX_DEF)
     print("  ── 启动自检 ──")
     print(f"  {_mark(bool(config.DEEPSEEK_API_KEY))} 大脑（DeepSeek key）" + (
         " ← 没配！先跑 python scripts/setup_keys.py --set deepseek" if not config.DEEPSEEK_API_KEY else ""))
@@ -938,6 +942,8 @@ def main():
         " ← models/faster-whisper 没下载，「说」走火山识别" if not os.path.isdir(whisper_stt._MODEL_PATH) else ""))
     print(f"  {_mark(embed._files_ready())} 语义记忆" + (
         " ← models/bge-small-zh 没下载，记忆只认字面不认意思" if not embed._files_ready() else ""))
+    print(f"  {_mark(_sfx_ready())} 拟声素材" + (
+        " ← 清嗓/叹气/轻笑缺失，第一次触发时会现合成（要等几秒）" if not _sfx_ready() else ""))
     print(f"  {_mark(not _backup_due())} 数据备份" + (
         " ← 超过 7 天没备份了，跑 python scripts/backup.py 保护聊天记录" if _backup_due() else ""))
     print("  ────────────")
