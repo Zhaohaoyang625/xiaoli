@@ -1,0 +1,35 @@
+# ============================================
+# 小李项目 .gitignore（2026-08-23 建库，安全收尾）
+# 原则：私密数据/大模型/缓存永不进库；代码/文档/资产全入库
+# ============================================
+
+# 私密数据：聊天记录、记忆、世界简报、曲库——全是她与他的私事，永不入库
+data/
+
+# 模型（7.2G，可从 ModelScope/清华镜像重新下载，下载方法见 docs/encyclopedia.md）
+models/
+
+# 研究原始材料（85M：开源项目源码/论文 PDF/试听音频——下载物可重拉，
+# 核心价值在研究结论文档 docs/research/*.md 与 design-log，已入库）
+docs/research/sources/
+docs/research/tts_compare/
+docs/research/eval/
+
+# Python 缓存与产物
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# 日志（server.log 等，运行期生成）
+*.log
+
+# 编辑器/系统/工具
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.claude/

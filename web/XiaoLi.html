@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>小李</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: linear-gradient(180deg, #ffe3ec 0%, #ffd6e0 60%, #ffc9d8 100%);
+    font-family: "Microsoft JhengHei", "Segoe UI", sans-serif;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh; overflow: hidden;
+  }
+  .stage { text-align: center; width: 420px; }
+  .name { font-size: 34px; color: #d4487a; font-weight: bold; letter-spacing: 4px; }
+  .moodline { font-size: 16px; color: #b0456b; margin: 4px 0 14px; min-height: 22px; }
+  /* 表情演示大字标签（盖在形象上方，看清当前是什么表情） */
+  .demo-tag { position: absolute; top: -6px; left: 50%; transform: translateX(-50%);
+    background: rgba(255, 255, 255, 0.95); border: 2px solid #b0456b; border-radius: 20px;
+    color: #b0456b; font-size: 20px; font-weight: bold; padding: 4px 18px; z-index: 10;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); white-space: nowrap; }
+
+  /* ======= 脸 ======= */
+  .face {
+    width: 260px; height: 260px; margin: 0 auto;
+    background: #ffdfc4;
+    border-radius: 50%;
+    position: relative;
+    box-shadow: 0 12px 40px rgba(212, 72, 122, .25), inset 0 -8px 18px rgba(255, 190, 150, .5);
+    animation: breathe 3.5s ease-in-out infinite;
+  }
+  @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.015); } }
+
+  .blush { position: absolute; top: 150px; width: 46px; height: 22px;
+    background: rgba(255, 120, 140, .45); border-radius: 50%; filter: blur(1px); }
+  .blush.l { left: 30px; } .blush.r { right: 30px; }
+
+  .brow { position: absolute; top: 78px; width: 46px; height: 8px; border-radius: 4px;
+    background: #8a5a3b; transition: all .3s; }
+  .brow.l { left: 58px; } .brow.r { right: 58px; }
+
+  .eye { position: absolute; top: 108px; width: 40px; height: 40px; transition: all .3s; }
+  .eye.l { left: 56px; } .eye.r { right: 56px; }
+  .pupil { width: 16px; height: 20px; background: #3a2a1e; border-radius: 50%;
+    margin: 8px auto 0; transition: all .3s; }
+  .sparkle { position: absolute; width: 6px; height: 6px; background: #fff;
+    border-radius: 50%; top: 10px; left: 10px; }
+
+  .mouth { position: absolute; top: 172px; left: 50%; transform: translateX(-50%);
+    width: 52px; height: 22px; transition: all .3s; }
+
+  /* ======= 表情 ======= */
+  .face.neutral { } /* 默认表情：圆眼圆嘴，就是她最平常的样子 */
+
+  .face.happy .eye { height: 18px; top: 118px; }
+  .face.happy .pupil { border-radius: 0 0 20px 20px; height: 14px; margin-top: 0; }
+  .face.happy .mouth { border-bottom: 5px solid #8a3a2a; border-radius: 0 0 40px 40px; height: 16px; }
+
+  .face.sad .eye { height: 20px; top: 112px; }
+  .face.sad .pupil { height: 14px; margin-top: 6px; border-radius: 50%; }
+  .face.sad .mouth { border-top: 5px solid #8a3a2a; border-radius: 40px 40px 0 0; height: 14px; }
+  .face.sad .brow { top: 82px; transform: rotate(-8deg); }
+  .face.sad .brow.l { transform: rotate(-8deg) translateY(-4px); }
+  .face.sad .brow.r { transform: rotate(8deg) translateY(-4px); }
+
+  .face.angry .brow { background: #b3443a; transform: rotate(14deg); }
+  .face.angry .brow.l { transform: rotate(14deg) translateY(4px); }
+  .face.angry .brow.r { transform: rotate(-14deg) translateY(4px); }
+  .face.angry .pupil { width: 14px; }
+  .face.jealous .brow { background: #b39a3a; transform: rotate(10deg); }
+  .face.jealous .brow.l { transform: rotate(10deg) translateY(2px); }
+  .face.jealous .brow.r { transform: rotate(-10deg) translateY(2px); }
+  .face.jealous .pupil { width: 12px; }
+  .face.jealous .pupil.l { transform: translateX(-2px); }
+  .face.jealous .pupil.r { transform: translateX(2px); }
+  .face.jealous .mouth { width: 24px; height: 8px; border-bottom: 4px solid #8a6a3a;
+    border-radius: 0 0 30px 30px; transform: translateX(4px); }
+  .face.angry .mouth { width: 34px; height: 26px; border: 4px solid #8a3a2a; border-radius: 50%;
+    border-top-color: transparent; border-left-color: transparent; transform: translateX(-50%) rotate(-10deg); }
+
+  .face.affectionate .pupil { background: transparent; }
+  .face.affectionate .pupil::before { content: "❤"; font-size: 22px; position: absolute;
+    top: -6px; left: -2px; }
+  .face.affectionate .mouth { border-bottom: 5px solid #d4487a; border-radius: 0 0 40px 40px; height: 14px; }
+
+  .face.flustered .pupil { width: 8px; height: 10px; margin-top: 14px; }
+  .face.flustered .mouth { width: 30px; height: 8px; border-bottom: 4px solid #8a3a2a;
+    border-radius: 0 0 20px 20px; }
+
+  .face.excited .pupil { width: 20px; height: 22px; }
+  .face.excited .mouth { width: 44px; height: 30px; border-radius: 50%;
+    background: #8a3a2a; border: 4px solid #8a3a2a; border-top-width: 0;
+    border-radius: 0 0 40px 40px; }
+
+  .face.curious .brow.l { transform: rotate(-10deg) translateY(6px); }
+  .face.curious .pupil { width: 13px; }
+  .face.curious .mouth { width: 40px; border-bottom: 4px solid #8a3a2a; border-radius: 0 0 30px 30px; height: 12px; }
+
+  .face.playful .pupil { width: 12px; height: 16px; }
+  .face.playful .brow.r { transform: rotate(8deg) translateY(-4px); }
+  .face.playful .mouth { border-bottom: 5px solid #8a3a2a; border-radius: 0 0 30px 30px;
+    width: 58px; height: 14px; }
+
+  .face.frustrated .brow { transform: rotate(16deg); }
+  .face.frustrated .brow.l { transform: rotate(16deg) translateY(6px); }
+  .face.frustrated .brow.r { transform: rotate(-16deg) translateY(6px); }
+  .face.frustrated .mouth { width: 40px; height: 14px; border-bottom: 5px solid #8a3a2a;
+    border-radius: 0 0 30px 30px; }
+
+  .face.melancholy .eye { height: 16px; top: 112px; }
+  .face.melancholy .pupil { height: 12px; margin-top: 4px; }
+  .face.melancholy .mouth { border-top: 4px solid #8a3a2a; border-radius: 30px 30px 0 0; height: 12px; }
+  .face.melancholy .blush { opacity: .3; }
+
+  /* ======= 面板 ======= */
+  .panel { margin-top: 18px; background: rgba(255, 255, 255, .75); border-radius: 18px;
+    padding: 14px 18px; box-shadow: 0 6px 24px rgba(212, 72, 122, .15); }
+  .bar { height: 10px; background: #f3d9e2; border-radius: 8px; overflow: hidden; }
+  .fill { height: 100%; width: 60%; background: linear-gradient(90deg, #ff9bb8, #d4487a);
+    border-radius: 8px; transition: width .8s; }
+  .loves { font-size: 12px; color: #a05c76; margin-top: 4px; }
+  .subtitle { margin-top: 10px; font-size: 17px; color: #7a3a55; min-height: 46px;
+    line-height: 1.5; }
+  .cursor::after { content: "▍"; color: #d4487a; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .footer { margin-top: 8px; font-size: 12px; color: #c98aa3; }
+
+  /* ======= 说话按钮 ======= */
+  .talk-row { margin-top: 12px; display: flex; gap: 10px; justify-content: center; align-items: center; }
+  .talkbtn {
+    background: linear-gradient(135deg, #ff9bb8, #d4487a);
+    color: #fff; border: none; border-radius: 30px;
+    padding: 10px 22px; font-size: 16px; cursor: pointer;
+    box-shadow: 0 4px 14px rgba(212, 72, 122, .35);
+    transition: all .2s;
+  }
+  .talkbtn:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(212, 72, 122, .45); }
+  .talkbtn:active { transform: scale(.96); }
+  .talkbtn:disabled { opacity: .6; cursor: wait; transform: none; }
+  .talkbtn.small { font-size: 13px; padding: 8px 14px; background: rgba(255,255,255,.85);
+    color: #d4487a; box-shadow: none; border: 1px solid #f0c2d3; }
+  .talkbtn.listening { animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { transform: scale(1.06); } }
+  #talkStatus { margin-top: 8px; font-size: 13px; color: #a05c76; min-height: 18px; }
+
+  /* ======= Live2D（v2 O1）：canvas 盖在 CSS 脸位置；依赖/加载失败 → 隐藏，CSS 脸照常 ======= */
+  #live2d-wrap { position: relative; width: 340px; height: 370px; margin: 0 auto; display: none; }
+  #live2d-canvas { position: absolute; inset: 0; }
+  .face.hidden-live2d { display: none; }
+</style>
+</head>
+<!-- Live2D 依赖（v2 O1）：任一个失败 → onerror 置标记 → CSS 脸兜底，绝不影响聊天。
+     模型：Shizuku（免费）经 jsDelivr gh 镜像；Core 走 Live2D 官方 CDN -->
+<!-- 2026-08-22 全部本地化（最终方案）：用户浏览器实测访问 jsDelivr 图片失败（'Error while sending request'）
+     且 GitHub/HF 直连不通——CDN 方案在她网络下不可靠。全部库 + 模型下载到本地（web/vendor/ + web/live2d/），
+     网页完全离线可用，file:// 同源加载贴图也无 CORS 问题。踩坑档案见 docs/design-log.md Live2D 节。 -->
+<script src="./vendor/live2dcubismcore.min.js" onerror="window.__l2dDepsFail=1;window.__l2dFailMsg='核心引擎 cubismcore 加载失败'"></script>
+<script src="./vendor/pixi.min.js" onerror="window.__l2dDepsFail=1;window.__l2dFailMsg='图形库 pixi.js 加载失败'"></script>
+<!-- Cubism 2.1 模型必须要有 live2d.min.js（官方 2.1 SDK 运行时）。漏掉它 = "Could not find Cubism 2 runtime" -->
+<script src="./vendor/live2d.min.js" onerror="window.__l2dDepsFail=1;window.__l2dFailMsg='Live2D 2.1 SDK 加载失败'"></script>
+<script src="./vendor/display-index.min.js" onerror="window.__l2dDepsFail=1;window.__l2dFailMsg='Live2D 共用库加载失败'"></script>
+<!-- index.min.js 只是共用入口，必须再引 cubism2.min.js（真正加载 .moc 的运行时） -->
+<script src="./vendor/display-cubism2.min.js" onerror="window.__l2dDepsFail=1;window.__l2dFailMsg='模型运行时 cubism2 加载失败'"></script>
+<body>
+<!-- 2026-08-22 小白诊断条：Live2D 失败时页面底部直接显示原因（不用开控制台） -->
+<div id="l2d-debug" style="position:fixed;left:8px;bottom:6px;max-width:90%;font-size:11px;color:#888;background:rgba(255,255,255,.85);padding:3px 8px;border-radius:6px;display:none;z-index:999;"></div>
+<!-- 常驻调试条：Live2D 注入状态实时显示（排查表情时截图给开发者看） -->
+<div id="l2d-status" style="position:fixed;right:8px;bottom:6px;max-width:46%;font-size:10px;color:#aaa;background:rgba(255,255,255,.7);padding:2px 8px;border-radius:6px;z-index:999;text-align:right;">Live2D 未启动</div>
+<div class="stage">
+  <div class="name">小 李</div>
+  <div class="moodline" id="moodline">❤ 陪着你</div>
+
+  <div class="face" id="face">
+    <div class="blush l"></div><div class="blush r"></div>
+    <div class="brow l"></div><div class="brow r"></div>
+    <div class="eye l"><div class="sparkle"></div><div class="pupil"></div></div>
+    <div class="eye r"><div class="sparkle"></div><div class="pupil"></div></div>
+    <div class="mouth"></div>
+  </div>
+
+  <!-- Live2D 容器（v2 O1）：加载成功 → 遮住 CSS 脸；失败 → 保持隐藏，CSS 脸继续 -->
+  <div id="live2d-wrap"><canvas id="live2d-canvas"></canvas><div id="demo-tag" class="demo-tag" style="display:none"></div></div>
+
+  <div class="panel">
+    <div class="bar"><div class="fill" id="fill"></div></div>
+    <div class="loves" id="loves">好感度：60 / 100</div>
+    <div class="subtitle" id="subtitle">嗨～ 人家是小李，快来跟我聊天吧！</div>
+    <div class="talk-row">
+      <button class="talkbtn" id="talkBtn">🎤 点一下，然后说话</button>
+      <button class="talkbtn small" id="voiceBtn">🔊 出声：开</button>
+      <button class="talkbtn small" id="proactiveBtn">💬 主动说话：开</button>
+      <button class="talkbtn small" id="rememberBtn" title="把你刚说的这句话牢牢记下来（她不会忘）">📌 记住这句</button>
+      <button class="talkbtn small" id="callBtn" title="免按键对话：麦克风常开，你直接说话她就回（她要你等她说完）">📞 通话：关</button>
+      <button class="talkbtn small" id="faceDemoBtn" title="看她做各种表情（每2.5秒换一个，再点一次停止）">😊 看表情</button>
+    </div>
+    <div id="talkStatus"></div>
+  </div>
+  <div class="footer">先运行 python chat.py --voice，点🎤直接开口跟她说话</div>
+</div>
+
+<script>
+// 心情 → 表情 / 文字 / 颜色
+const MOODS = {
+  happy:        { face: "happy",        text: "😊 开心",       color: "#ff8fae" },
+  sad:          { face: "sad",          text: "😢 难过",       color: "#8fa8ff" },
+  excited:      { face: "excited",      text: "🤩 超兴奋",     color: "#ffb347" },
+  anxious:      { face: "curious",      text: "😟 有点紧张",   color: "#b0a8c9" },
+  content:      { face: "happy",        text: "😌 满足",       color: "#8fd6a0" },
+  frustrated:   { face: "frustrated",   text: "😤 有点小烦躁", color: "#c9a05e" },
+  curious:      { face: "curious",      text: "🤔 好奇",       color: "#a0c0d6" },
+  affectionate: { face: "affectionate", text: "🥰 想撒娇",     color: "#ff7ba6" },
+  playful:      { face: "playful",      text: "😏 想逗你",     color: "#d6a0c9" },
+  flustered:    { face: "flustered",    text: "😳 害羞啦",     color: "#ff9db0" },
+  neutral:      { face: "neutral",      text: "🙂 平静",       color: "#a0a0a0" },
+  melancholy:   { face: "melancholy",   text: "🥺 想你了",     color: "#9aa8d6" },
+  jealous:      { face: "jealous",      text: "😒 吃醋啦",     color: "#c98f3a" },
+  angry:        { face: "angry",        text: "😠 真生气了",   color: "#d64f4f" },
+};
+
+let typingToken = 0;  // 打字机"取消令牌"：新的话来了，旧打字机必须让位
+
+function applyState(s) {
+  if (!s) return;
+  const m = MOODS[s.mood] || MOODS.neutral;
+  // 演示模式：动作也被接管（否则每秒轮询会重播动画 → 表情被动画拉扯，越看越对不上）
+  if (!faceDemo) {
+    live2dOnMood(s.mood);  // Live2D 情绪联动（没启用时是空操作）
+    window.__mood = s.mood || "neutral";  // 微表情：演示模式时不受主程序状态覆盖
+    // CSS 兜底脸也归主程序管（演示模式时由演示循环接管，防打架）
+    document.getElementById("face").className = "face " + m.face;
+  }
+  // 演示模式时 moodline 归演示循环管（否则每 1 秒轮询会把"表情演示：xx"冲掉，用户看不清）
+  if (!faceDemo) {
+    document.getElementById("moodline").textContent = m.text + (s.intensity ? " · 程度 " + s.intensity : "");
+    document.getElementById("moodline").style.color = m.color;
+  }
+  document.getElementById("fill").style.width = s.affection + "%";
+  document.getElementById("loves").textContent = "好感度：" + s.affection + " / 100";
+  // 🔊 开关按钮跟随她的声音状态（Python 每次刷新会带上 voice）
+  const vBtn = document.getElementById("voiceBtn");
+  if (s.voice !== undefined) {
+    vBtn.textContent = "🔊 出声：" + (s.voice ? "开" : "关");
+    vBtn.dataset.on = s.voice ? "1" : "0";
+  }
+  // 2026-08-22 口型同步：她正在说话的时间戳（epoch 秒；0 = 没说）→ 驱动 Live2D 嘴巴
+  if (typeof s.speaking_until === "number") {
+    window.__speakingUntil = s.speaking_until;
+  }
+  // ⚠️ 安全修复（2026-08-22）：网页桥会话 token——本地桥每个请求必须带它
+  //   （后端 403 拒绝无 token 请求；恶意网页读不到这个文件所以拿不到 token）
+  if (s.bridge_token) {
+    window.__bridgeToken = s.bridge_token;
+  }
+  // 💬 主动开关：开 = 她会自己找你（早安/晚安/生日/想你了）；关 = 只等你说话
+  const pBtn = document.getElementById("proactiveBtn");
+  if (s.proactive !== undefined) {
+    pBtn.textContent = "💬 主动说话：" + (s.proactive ? "开" : "关");
+    pBtn.dataset.on = s.proactive ? "1" : "0";
+  }
+  const sub = document.getElementById("subtitle");
+  if (s.text && s.text !== sub.dataset.last) {
+    sub.dataset.last = s.text;
+    typewriter(sub, s.text);
+  }
+}
+
+function typewriter(el, text) {
+  const token = ++typingToken;  // 本次打字机的令牌
+  el.classList.add("cursor");
+  el.textContent = "";
+  // 15ms/字 ≈ 每秒60字，快速推进不机械（原来是60ms，逐字感重）
+  let i = 0;
+  const step = () => {
+    if (token !== typingToken) return;  // 已被新的话打断：旧打字机立即停手
+    if (i <= text.length) { el.textContent = text.slice(0, i++); setTimeout(step, 15); }
+    else { el.classList.remove("cursor"); }
+  };
+  step();
+}
+
+// ======= 🎤 点一下，然后说话（语音输入）=======
+const BRIDGE = "http://127.0.0.1:8800";
+// ⚠️ 安全修复（2026-08-22）：本地桥鉴权——每个请求带会话 token（applyState 从
+//   face_state.js 拿到）。后端无 token 一律 403，恶意网页拿不到 token 无法触发
+//   录音/写记忆/开监听。
+const BRIDGE_TOKEN = () => "&token=" + encodeURIComponent(window.__bridgeToken || "");
+
+function sayByMic() {
+  const btn = document.getElementById("talkBtn");
+  const status = document.getElementById("talkStatus");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.classList.add("listening");
+  status.textContent = "🎤 在听你说…（说完安静1秒就停）";
+  fetch(BRIDGE + "/listen" + BRIDGE_TOKEN())
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) status.textContent = "（你刚才说：" + d.text + "）";
+      else status.textContent = "（没听清，再说一次？）";
+      setTimeout(() => { status.textContent = ""; }, 4000);
+    })
+    .catch(() => { status.textContent = "⚠️ 连不上本地桥——先运行 python chat.py --voice"; })
+    .finally(() => {
+      btn.disabled = false;
+      btn.classList.remove("listening");
+    });
+}
+
+function toggleVoice() {
+  const btn = document.getElementById("voiceBtn");
+  const on = btn.dataset.on === "1" ? "0" : "1";
+  fetch(BRIDGE + "/set_voice?on=" + on + BRIDGE_TOKEN())
+    .then(r => r.json())
+    .then(d => {
+      btn.textContent = "🔊 出声：" + (d.voice ? "开" : "关");
+      btn.dataset.on = d.voice ? "1" : "0";
+    })
+    .catch(() => { btn.textContent = "⚠️ 连不上本地桥"; });
+}
+
+function toggleProactive() {
+  const btn = document.getElementById("proactiveBtn");
+  const on = btn.dataset.on === "1" ? "0" : "1";
+  fetch(BRIDGE + "/set_proactive?on=" + on + BRIDGE_TOKEN())
+    .then(r => r.json())
+    .then(d => {
+      btn.textContent = "💬 主动说话：" + (d.proactive ? "开" : "关");
+      btn.dataset.on = d.proactive ? "1" : "0";
+    })
+    .catch(() => { btn.textContent = "⚠️ 连不上本地桥"; });
+}
+
+document.getElementById("talkBtn").addEventListener("click", sayByMic);
+document.getElementById("voiceBtn").addEventListener("click", toggleVoice);
+document.getElementById("proactiveBtn").addEventListener("click", toggleProactive);
+
+// 📌 记住这句（O4）：把你刚说的那句话存成她牢牢记着的记忆（importance=9）
+document.getElementById("rememberBtn").addEventListener("click", () => {
+  const btn = document.getElementById("rememberBtn");
+  btn.textContent = "⏳ 记住中…";
+  fetch(BRIDGE + "/remember" + BRIDGE_TOKEN())
+    .then(r => r.json())
+    .then(d => {
+      btn.textContent = d.ok ? "✅ 记住啦！" : "❌ 没记到";
+      if (d.ok) status.textContent = "📌 她说她会牢牢记着：「" + d.text + "」";
+      setTimeout(() => { btn.textContent = "📌 记住这句"; }, 2500);
+    })
+    .catch(() => { btn.textContent = "⚠️ 连不上"; setTimeout(() => { btn.textContent = "📌 记住这句"; }, 2000); });
+});
+
+// 📞 通话模式（v2 O2）：免按键对话开关（麦克风常开，你说她就回）
+document.getElementById("callBtn").addEventListener("click", () => {
+  const btn = document.getElementById("callBtn");
+  const turningOn = btn.textContent.includes("关");  // 显示"关"= 还没开
+  btn.disabled = true;
+  btn.textContent = turningOn ? "⏳ 正在开…" : "⏳ 正在关…";
+  fetch(BRIDGE + "/call_mode?on=" + (turningOn ? 1 : 0) + BRIDGE_TOKEN())
+    .then(r => r.json())
+    .then(d => {
+      btn.textContent = d.on ? "📞 通话：开" : "📞 通话：关";
+      status.textContent = d.on
+        ? "📞 通话中：直接说话她就回（她说话时你等她说完）"
+        : "📞 通话已关";
+      btn.disabled = false;
+    })
+    .catch(() => {
+      btn.textContent = "⚠️ 连不上";
+      setTimeout(() => { btn.textContent = "📞 通话：关"; btn.disabled = false; }, 2000);
+    });
+});
+
+// ======= Live2D（v2 O1）：Shizuku 会动的小人（离线/加载失败 → CSS 脸兜底） =======
+// 设计：所有步骤 try/catch + 依赖失败标记 + 6 秒超时——任何一个问题都安静回退，
+// 绝不影响聊天和表情。加载成功 → CSS 脸隐藏、canvas 显示，情绪仍走 applyState 联动。
+let live2dModel = null;
+let live2dOk = false;
+let live2dDone = false;  // 防止多次初始化
+
+// 情绪 → Shizuku 动作名（组名必须是 model.json 里的：idle/shake/flick_head/tap_body…）
+const L2D_MOTIONS = {
+  happy: "idle", excited: "idle", playful: "idle", affectionate: "idle",
+  angry: "flick_head", jealous: "flick_head", flustered: "idle",
+  sad: "shake", anxious: "idle", melancholy: "idle",
+};
+let lastMotion = null;  // 防重播：同一动作不重复播（否则每秒轮询重启动画，表情被拉扯）
+
+// 2026-08-22 微表情（六修·官方表情方案）：不再盲调参数（五次迭代证明硬覆盖会
+// 破坏动画部件——眉毛不动/只有嘴变/眼睛错位，全是参数盲调的病）。
+// 表情方案（2026-08-22 最终版）：
+// 官方 3 个表情：f02=沮丧（眼珠朝下+低头+撇嘴）、f03=难过（八字眉）、f04=开心害羞
+// ⚠️ 实测教训：官方没有"生气"！最初把 angry→f02，用户实测"生气像难过还凶"。
+//   官方表情机制是叠加式（calc mult/add/set，不破坏眨眼/姿势动画）→
+//   按官方格式自写 3 个表情（angry/jealous/anxious），参数全部沿用官方验证过的
+//   （BROW_FORM 负=皱眉、ANGLE=眉尾压、EYE_BALL=斜眼、MOUTH_FORM 负=抿嘴），
+//   绝不碰 EYE_OPEN/BODY_Y 等位置类参数（那些是拉变形的元凶）。
+const L2D_EXPR = {
+  angry: "angry", jealous: "jealous", anxious: "anxious",  // 自定义：皱眉瞪眼/斜眼/不安
+  sad: "f03", melancholy: "f02",                           // 难过系→f03；低落→f02（官方沮丧）
+  happy: "f04", excited: "f04", playful: "f04",            // 开心系 → f04
+  affectionate: "f04", content: "f04", flustered: "f04",
+  neutral: null,                                           // null = 不套表情（恢复默认脸）
+  // 自映射：演示循环直接传表情名（f02/f03/f04/angry/jealous/anxious/neutral）
+  "f02": "f02", "f03": "f03", "f04": "f04",
+  "angry": "angry", "jealous": "jealous", "anxious": "anxious",
+};
+let lastExpr = null;  // 防重播：同一表情不重复设置（表情切换有 500ms 淡入淡出）
+
+function l2dDebug(msg) {
+  const d = document.getElementById("l2d-debug");
+  if (d) {
+    // 2026-08-22 加打开方式显示：file:// 会模型加载失败（浏览器禁止），必须 http://127.0.0.1:8080
+    d.textContent = "Live2D: " + msg + " ｜" + location.protocol + "//" + location.host;
+    d.style.display = "block";
+  }
+}
+
+// 2026-08-22 埋点汇报：每一步状态发给本地服务器（404 无妨，服务器日志会记录路径），
+//   调试"模型加载失败"不用开 F12——我直接读 server.log 就知道浏览器内部发生了什么
+function __l2dReport(msg) {
+  try {
+    fetch("/__report?msg=" + encodeURIComponent(msg), { mode: "no-cors", cache: "no-store" });
+  } catch (e) {}
+}
+
+function initLive2D() {
+  if (live2dDone) return;
+  live2dDone = true;
+  try {
+    __l2dReport("init 开始 URL=" + location.href.slice(0, 60));
+    if (window.__l2dDepsFail || !window.PIXI || !PIXI.live2d) {
+      l2dDebug(window.__l2dFailMsg || "依赖库不可用（可能是网络拦截）");
+      __l2dReport("依赖失败 " + (window.__l2dFailMsg || "no PIXI.live2d"));
+      console.log("Live2D 依赖不可用，用 CSS 脸兜底");
+      return;
+    }
+    __l2dReport("依赖 OK：PIXI " + (window.PIXI.VERSION || "?") + "，PIXI.live2d " + (PIXI.live2d.Live2DModel ? "有模型" : "无模型"));
+    const wrap = document.getElementById("live2d-wrap");
+    const canvas = document.getElementById("live2d-canvas");
+    // 2026-08-22 修复：resizeTo 会在容器隐藏（display:none）时量出 0x0 → canvas 0 像素 → 小人画不出来
+    // 改固定尺寸 340x370，模型加载成功后手动 resize 一次兜底
+    const app = new PIXI.Application({
+      view: canvas, width: 340, height: 370,
+      backgroundAlpha: 0, autoStart: true,
+    });
+    __l2dReport("PIXI.Application 建好");
+    PIXI.live2d.Live2DModel.from(
+      // 2026-08-22 本地化：模型下载到 web/live2d/shizuku/
+      "./live2d/shizuku/shizuku.model.json",
+      { autoInteract: false }
+    ).then(model => {
+      // 尺寸/位置：让她的脸落在原来 CSS 脸的区域
+      model.scale.set(0.28);
+      model.anchor.set(0.5, 0.72);
+      model.x = app.screen.width / 2;
+      model.y = app.screen.height * 0.95;
+      app.stage.addChild(model);
+      live2dModel = model;
+      live2dOk = true;
+      // 隐藏 CSS 兜底大头脸（双保险：类 + 内联样式，任何缓存旧 CSS 都不影响）
+      const faceEl = document.getElementById("face");
+      if (faceEl) { faceEl.classList.add("hidden-live2d"); faceEl.style.display = "none"; }
+      wrap.style.display = "block";
+      // 兜底：确保画布有真实尺寸（340x370）
+      app.renderer.resize(wrap.clientWidth || 340, wrap.clientHeight || 370);
+      model.x = app.screen.width / 2;
+      model.y = app.screen.height * 0.95;
+
+      // 2026-08-22 口型同步 + 微表情：说话时嘴巴一张一合；情绪驱动眉头/眼睛/嘴型/眼珠。
+      // afterMotionUpdate 在动画更新后触发 → 我们设的值会渲染出来（不被动画覆盖）
+      let mouthLevel = 0;
+      let faceProbe = null;  // 参数探测结果（null=没探测过，报告到 server.log 确认模型支持哪些）
+      let amuFirst = true;   // 首次触发报告（确认事件在跑）
+      let injectCount = 0, lastStatusAt = 0;
+      const l2dStatus = (msg) => {  // 页面内调试条（绕开遥测谜团：状态直接显示在页面上）
+        const now = Date.now();
+        if (now - lastStatusAt < 400) return;
+        lastStatusAt = now;
+        const el = document.getElementById("l2d-status");
+        if (el) el.textContent = msg;
+      };
+      setInterval(() => {
+        // 口型同步：她正在说话 → 嘴巴一张一合（只注入 MOUTH_OPEN_Y，官方表情不碰它）
+        const now = Date.now() / 1000;
+        mouthLevel = (window.__speakingUntil && now < window.__speakingUntil)
+          ? 0.55 + Math.random() * 0.35 : 0;
+      }, 100);
+      // 2026-08-22 注入点四修（事件源修正，关键！）：
+      // display 层 model.update(t) 只累加时间（看库源码），真正的动画/物理/姿势更新
+      // 发生在【内部模型 internalModel】的 update(t,e) 里（emit beforeModelUpdate 的也是它）。
+      // 之前监听在 display 层 model 上 → 事件永远收不到 → 注入从没触发过 → 表情全对不上。
+      // 现在挂到 internalModel（正确事件源），时序：动画→表情→眨眼→自然动作→物理→姿势
+      // →【我们注入】→ coreModel.update 渲染 → 注入值真正显示出来
+      const injectFace = () => {
+        try {
+          const cm = live2dModel.internalModel && live2dModel.internalModel.coreModel;
+          if (amuFirst) {
+            amuFirst = false;
+            __l2dReport("注入点触发 cm=" + (cm ? "有" : "无") + " setParamFloat="
+              + (cm && typeof cm.setParamFloat) + " mood=" + window.__mood);
+          }
+          if (!cm || !cm.setParamFloat) return;
+          // ① 官方表情（叠加式，不破坏动画）：情绪变了才切换（有 500ms 淡入淡出）
+          const ex = L2D_EXPR[window.__mood] || null;
+          if (ex !== lastExpr) {
+            lastExpr = ex;
+            if (ex) {
+              live2dModel.expression(ex);
+            } else {
+              const em = live2dModel.internalModel.motionManager.expressionManager;
+              if (em && em.resetExpression) em.resetExpression();  // neutral：清掉表情
+            }
+          }
+          injectCount++;
+          l2dStatus("注入#" + injectCount + " " + window.__mood + " → 官方表情 " + (ex || "无"));
+          // ② 只注入口型（官方表情不碰 MOUTH_OPEN_Y，说话张嘴是独立维度）
+          try { if (cm.getParamIndex("PARAM_MOUTH_OPEN_Y") >= 0) cm.setParamFloat("PARAM_MOUTH_OPEN_Y", mouthLevel); } catch (e) {}
+        } catch (e) {}
+      };
+      const im = live2dModel.internalModel;
+      if (im && typeof im.on === "function") {
+        im.on("beforeModelUpdate", injectFace);  // 正确事件源：内部模型
+        l2dStatus("✅ 已挂到内部模型事件");
+      } else {
+        // 兜底：自己驱动（关掉 autoUpdate，ticker 手动更新 + 注入）
+        l2dStatus("⚠️ 内部模型无事件 → ticker 驱动");
+        try { live2dModel.autoUpdate = false; } catch (e) {}
+        app.ticker.add(() => {
+          try { live2dModel.update(1 / 60); } catch (e) {}
+          injectFace();
+        });
+      }
+
+      __l2dReport("模型成功：canvas " + canvas.width + "x" + canvas.height + " wrap=" + wrap.style.display);
+      const st = document.getElementById("l2d-status");
+      if (st) st.textContent = "✅ 模型已加载 " + canvas.width + "x" + canvas.height;
+      playLive2dMotion("idle");
+    }).catch(e => {
+      const ev = e && e.event ? (e.event.message || e.event.status || String(e.event)) : "";
+      __l2dReport("模型失败 e=" + (e && e.message ? e.message : e) + (ev ? " ev=" + ev : "") + " status=" + (e && e.status));
+      l2dDebug("模型加载失败：" + (e && e.message ? e.message : e) + (ev ? "（详情: " + ev + "）" : ""));
+      console.log("Live2D 模型加载失败，CSS 脸兜底", e);
+    });
+    // 15 秒还没好就放弃
+    setTimeout(() => {
+      if (!live2dOk) { l2dDebug("15秒超时：模型还没加载完（网络慢？）"); __l2dReport("15秒超时"); try { app.destroy(true); } catch (e) {} }
+    }, 15000);
+  } catch (e) { __l2dReport("初始化异常 " + (e && e.message ? e.message : e)); l2dDebug("初始化出错：" + (e && e.message ? e.message : e)); console.log("Live2D 初始化失败，CSS 脸兜底", e); }
+}
+
+function playLive2dMotion(name) {
+  if (!live2dModel || !live2dModel.internalModel) return;
+  try {
+    const mm = live2dModel.internalModel.motionManager || {};
+    if (!mm.groups || !mm.groups[name]) return;  // 组不存在（名对不上 model.json）→ 不动
+    if (lastMotion === name) return;  // 同一动作不重播（防每秒轮询拉扯表情）
+    lastMotion = name;
+    live2dModel.motion(name);
+  } catch (e) {}
+}
+
+// 情绪变化 → 联动动作（applyState 里调用）
+function live2dOnMood(mood) {
+  if (!live2dOk) return;
+  playLive2dMotion(L2D_MOTIONS[mood] || "Idle");
+}
+initLive2D();
+
+function loadState() {
+  const s = document.createElement("script");
+  s.src = "data/face_state.js?t=" + Date.now();
+  s.onload = () => { applyState(window.XIAOLI_STATE); s.remove(); };
+  s.onerror = () => s.remove();
+  document.body.appendChild(s);
+}
+// 2026-08-22 表情演示（八修）：官方 3 表情 + 自定义 3 表情 + 平静。
+// 提示只显示实际存在的表情（用户实测"上面 12 种和脸对不上"）。
+// f02 官方是"沮丧"（眼珠朝下低头撇嘴），不是闹别扭——生气用自定义 angry（皱眉瞪眼）
+let faceDemo = null;
+const FACE_DEMO_ORDER = ["f04", "angry", "f02", "f03", "jealous", "neutral"];
+const EXPR_TEXT = {  // 表情 → 人话（标签就显示这个）
+  "f04": "开心害羞（笑+脸红）",
+  "angry": "生气（皱眉瞪眼）",
+  "f02": "沮丧（垂头丧气）",
+  "f03": "难过（八字眉）",
+  "jealous": "吃醋（斜眼撇嘴）",
+  "neutral": "平静（默认脸）",
+};
+const EXPR_FACE_CLASS = {  // 表情 → CSS 兜底脸类（模型加载失败时用）
+  "f04": "happy", "angry": "angry", "f02": "sad", "f03": "sad", "jealous": "angry", "neutral": "neutral",
+};
+function toggleFaceDemo() {
+  const btn = document.getElementById("faceDemoBtn");
+  const tag = document.getElementById("demo-tag");
+  if (faceDemo) {
+    clearInterval(faceDemo);
+    faceDemo = null;
+    btn.textContent = "😊 看表情";
+    tag.style.display = "none";
+    window.__mood = "neutral";
+    document.getElementById("moodline").textContent = "❤ 陪着你";
+    return;
+  }
+  let i = 0;
+  window.__mood = FACE_DEMO_ORDER[0];
+  btn.textContent = "⏹ 停止演示";
+  // 大字标签 + moodline 双显示（标签在形象上方，永远看得清；文字 = 官方表情实际效果）
+  const show = () => {
+    const m = FACE_DEMO_ORDER[i];
+    tag.textContent = "😊 " + (EXPR_TEXT[m] || m);
+    document.getElementById("moodline").textContent =
+      "官方表情演示：" + (EXPR_TEXT[m] || m) + "（每 3 秒换一个）";
+    // CSS 兜底脸也跟随演示（模型加载失败时她就是 CSS 脸——两个来源必须同步）
+    document.getElementById("face").className = "face " + (EXPR_FACE_CLASS[m] || "neutral");
+  };
+  show();
+  tag.style.display = "block";
+  faceDemo = setInterval(() => {
+    i = (i + 1) % FACE_DEMO_ORDER.length;
+    window.__mood = FACE_DEMO_ORDER[i];
+    show();
+  }, 3000);
+}
+document.getElementById("faceDemoBtn").addEventListener("click", toggleFaceDemo);
+
+loadState();
+setInterval(loadState, 1000);  // 2026-08-22 2s→1s：情绪/字幕延迟减半（用户实测"延迟有点高"）
+</script>
+</body>
+</html>
