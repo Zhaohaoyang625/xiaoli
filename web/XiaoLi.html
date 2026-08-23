@@ -125,6 +125,12 @@
   @keyframes blink { 50% { opacity: 0; } }
   .footer { margin-top: 8px; font-size: 12px; color: #c98aa3; }
 
+  /* ======= 打字聊天 ======= */
+  .send-row { margin-top: 12px; display: flex; gap: 8px; }
+  #sendInput { flex: 1; border: 1px solid #f0c2d3; border-radius: 18px; padding: 8px 14px;
+    font-size: 14px; outline: none; color: #7a3a55; background: #fff; }
+  #sendInput:focus { border-color: #d4487a; }
+
   /* ======= 最近对话 ======= */
   .chatlog { margin-top: 14px; background: rgba(255, 255, 255, .6); border-radius: 14px;
     padding: 8px 10px; max-height: 210px; overflow-y: auto; text-align: left; }
@@ -208,6 +214,11 @@
       <input type="file" id="photoInput" accept="image/*" style="display:none">
     </div>
     <div id="talkStatus"></div>
+  </div>
+  <!-- 💬 打字聊天（2026-08-23）：网页输入框，和终端聊天同一份日记 -->
+  <div class="send-row">
+    <input type="text" id="sendInput" placeholder="打字跟她说…（回车发送）" maxlength="200">
+    <button class="talkbtn small" id="sendBtn">发送</button>
   </div>
   <!-- 💬 最近对话（2026-08-23）：网页也能看到聊了啥，刷新不丢（数据在后端日记里） -->
   <div class="chatlog" id="chatlog">
@@ -698,6 +709,20 @@ function loadChatlog() {
 }
 loadChatlog();
 setInterval(loadChatlog, 2000);
+
+// ======= 💬 打字聊天（2026-08-23）：输入框 → /send → 输入队列 → 她照常回应 =======
+const sendInput = document.getElementById("sendInput");
+function sendText() {
+  const text = sendInput.value.trim();
+  if (!text) return;
+  sendInput.value = "";
+  fetch(BRIDGE + "/send?text=" + encodeURIComponent(text) + BRIDGE_TOKEN())
+    .then(r => r.json())
+    .then(d => { statusEl.textContent = d.ok ? "（她收到啦～）" : "（发送失败：" + (d.error || "未知") + "）"; })
+    .catch(() => { statusEl.textContent = "⚠️ 连不上本地桥"; });
+}
+document.getElementById("sendBtn").addEventListener("click", sendText);
+sendInput.addEventListener("keydown", e => { if (e.key === "Enter") sendText(); });
 </script>
 </body>
 </html>

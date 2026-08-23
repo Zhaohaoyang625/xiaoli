@@ -750,6 +750,14 @@ class WebBridge(http.server.BaseHTTPRequestHandler):
                 msgs.append({"role": role, "content": content[:300],
                              "time": m.get("time", "")})
             self._json({"ok": True, "messages": msgs})
+        elif path == "/send":
+            # 网页打字聊天（2026-08-23）：文本进输入队列 → 她照常回应（同照片路径）
+            text = qs.get("text", [""])[0][:200].strip()
+            if not text:
+                self._json({"ok": False, "error": "空消息"}, 400)
+                return
+            input_queue.put(("web", text))
+            self._json({"ok": True, "text": text})
         else:
             self._json({"ok": False}, 404)
 
