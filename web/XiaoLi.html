@@ -158,7 +158,7 @@
   .talkbtn:disabled { opacity: .6; cursor: wait; transform: none; }
   .talkbtn.small { font-size: 13px; padding: 8px 14px; background: rgba(255,255,255,.85);
     color: #d4487a; box-shadow: none; border: 1px solid #f0c2d3; }
-  .talkbtn.listening { animation: pulse 1s ease-in-out infinite; }
+  .talkbtn.calling { animation: pulse 1.2s ease-in-out infinite; background: #d4487a; color: #fff; }
   @keyframes pulse { 50% { transform: scale(1.06); } }
   #talkStatus { margin-top: 8px; font-size: 13px; color: #a05c76; min-height: 18px; }
 
@@ -205,11 +205,10 @@
     <div class="loves" id="loves">好感度：60 / 100</div>
     <div class="subtitle" id="subtitle">嗨～ 人家是小李，快来跟我聊天吧！</div>
     <div class="talk-row">
-      <button class="talkbtn" id="talkBtn">🎤 点一下，然后说话</button>
+      <button class="talkbtn" id="callBtn" title="免按键对话：麦克风常开，你直接说话她就回（她要你等她说完）">📞 通话：关</button>
       <button class="talkbtn small" id="voiceBtn">🔊 出声：开</button>
       <button class="talkbtn small" id="proactiveBtn">💬 主动说话：开</button>
       <button class="talkbtn small" id="rememberBtn" title="把你刚说的这句话牢牢记下来（她不会忘）">📌 记住这句</button>
-      <button class="talkbtn small" id="callBtn" title="免按键对话：麦克风常开，你直接说话她就回（她要你等她说完）">📞 通话：关</button>
       <button class="talkbtn small" id="faceDemoBtn" title="看她做各种表情（每2.5秒换一个，再点一次停止）">😊 看表情</button>
       <button class="talkbtn small" id="photoBtn" title="给她看张照片（自拍/猫猫/风景都行，她会像真人一样夸你/追问）">📷 传照片</button>
       <input type="file" id="photoInput" accept="image/*" style="display:none">
@@ -226,7 +225,7 @@
     <input type="text" id="sendInput" placeholder="打字跟她说…（回车发送）" maxlength="200">
     <button class="talkbtn small" id="sendBtn">发送</button>
   </div>
-  <div class="footer">先运行 python -m xiaoli.chat --voice（或双击 start.bat），点🎤直接开口跟她说话</div>
+  <div class="footer">先运行 python -m xiaoli.chat --voice（或双击 start.bat），点📞开通话免按键直接说话</div>
 </div>
 
 <script>
@@ -249,8 +248,8 @@ const MOODS = {
 };
 
 let typingToken = 0;  // 打字机"取消令牌"：新的话来了，旧打字机必须让位
-// ⚠️ 2026-08-23 修复：status 之前只在 sayByMic 里是局部变量，记住这句/传照片的
-//   回调里直接引用 status → ReferenceError → 成功也显示"连不上"。这里统一声明。
+// ⚠️ 2026-08-23 修复：status 之前是局部变量，记住这句/传照片的
+//   回调里直接引用 → ReferenceError → 成功也显示"连不上"。这里统一声明。
 const statusEl = document.getElementById("talkStatus");
 
 function applyState(s) {
@@ -314,33 +313,12 @@ function typewriter(el, text) {
   step();
 }
 
-// ======= 🎤 点一下，然后说话（语音输入）=======
+// ======= 网页 ↔ 本地桥 =======
 const BRIDGE = "http://127.0.0.1:8800";
 // ⚠️ 安全修复（2026-08-22）：本地桥鉴权——每个请求带会话 token（applyState 从
 //   face_state.js 拿到）。后端无 token 一律 403，恶意网页拿不到 token 无法触发
 //   录音/写记忆/开监听。
 const BRIDGE_TOKEN = () => "&token=" + encodeURIComponent(window.__bridgeToken || "");
-
-function sayByMic() {
-  const btn = document.getElementById("talkBtn");
-  const status = document.getElementById("talkStatus");
-  if (btn.disabled) return;
-  btn.disabled = true;
-  btn.classList.add("listening");
-  status.textContent = "🎤 在听你说…（说完安静1秒就停）";
-  fetch(BRIDGE + "/listen" + BRIDGE_TOKEN())
-    .then(r => r.json())
-    .then(d => {
-      if (d.ok) status.textContent = "（你刚才说：" + d.text + "）";
-      else status.textContent = "（没听清，再说一次？）";
-      setTimeout(() => { status.textContent = ""; }, 4000);
-    })
-    .catch(() => { status.textContent = "⚠️ 连不上本地桥——先运行 python -m xiaoli.chat --voice"; })
-    .finally(() => {
-      btn.disabled = false;
-      btn.classList.remove("listening");
-    });
-}
 
 function toggleVoice() {
   const btn = document.getElementById("voiceBtn");
@@ -366,7 +344,6 @@ function toggleProactive() {
     .catch(() => { btn.textContent = "⚠️ 连不上本地桥"; });
 }
 
-document.getElementById("talkBtn").addEventListener("click", sayByMic);
 document.getElementById("voiceBtn").addEventListener("click", toggleVoice);
 document.getElementById("proactiveBtn").addEventListener("click", toggleProactive);
 
@@ -406,6 +383,17 @@ document.getElementById("photoInput").addEventListener("change", () => {
     .catch(() => { statusEl.textContent = "📷 传送失败：连不上本地桥"; })
     .finally(() => { document.getElementById("photoInput").value = ""; });
 });
+
+// 页面加载时同步通话真实状态（可能终端那边已经开着通话）
+fetch(BRIDGE + "/call_mode" + BRIDGE_TOKEN())
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      const b = document.getElementById("callBtn");
+      b.textContent = d.on ? "📞 通话：开" : "📞 通话：关";
+    }
+  })
+  .catch(() => {});
 
 // 📞 通话模式（v2 O2）：免按键对话开关（麦克风常开，你说她就回）
 document.getElementById("callBtn").addEventListener("click", () => {
@@ -705,7 +693,7 @@ function loadChatlog() {
       lastChatlogKey = key;
       const body = document.getElementById("chatlogBody");
       if (!msgs.length) {  // 还没聊过：空状态提示（别让人以为坏了）
-        body.innerHTML = '<div class="msg assistant"><div class="bubble">（还没有对话——跟她说句话吧，上面输入框打字或点🎤）</div></div>';
+        body.innerHTML = '<div class="msg assistant"><div class="bubble">（还没有对话——跟她说句话吧，输入框打字或点📞开通话）</div></div>';
         return;
       }
       body.innerHTML = msgs.map(m =>

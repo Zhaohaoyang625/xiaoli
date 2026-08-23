@@ -976,6 +976,9 @@ def main():
         if facts:
             print(f"  （她记得关于你的 {len(facts)} 件事——输入「记忆」可查看）")
 
+    update_face("")  # 2026-08-23 修复：启动即写 face_state.js（会话 token 同步）
+    #   ← 之前启动不写，网页加载的是上次进程的旧 token → 403"连不上"（聊几句后才刷新）
+
     # B.2 启动检查：程序关闭期间到点的提醒 → 开机浮现（她给你留了话）
     missed = proactive.get_missed_reminders()
     if missed:

@@ -4,6 +4,7 @@
 # ============================================
 
 import io
+import os
 import unittest
 from contextlib import redirect_stdout
 from unittest import mock
@@ -189,3 +190,35 @@ class TestShowBrief(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFaceStateTokenSync(unittest.TestCase):
+    """2026-08-23 修复：启动即写 face_state.js（会话 token 同步）。
+    之前启动不写，网页加载到上次进程的旧 token → 403"连不上"（聊几句后才刷新）"""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved_file = chat_mod.FACE_STATE_FILE
+        chat_mod.FACE_STATE_FILE = os.path.join(self._tmp.name, "face_state.js")
+        self._saved_heart = chat_mod.her_heart
+        chat_mod.her_heart = {"mood": {"primary": "happy", "intensity": 60},
+                              "affection": 80}
+
+    def tearDown(self):
+        chat_mod.FACE_STATE_FILE = self._saved_file
+        chat_mod.her_heart = self._saved_heart
+        self._tmp.cleanup()
+
+    def test_write_state_includes_new_token(self):
+        chat_mod._bridge_token = "abc123"
+        chat_mod.update_face("")
+        with open(chat_mod.FACE_STATE_FILE, encoding="utf-8") as f:
+            raw = f.read()
+        self.assertIn("bridge_token", raw)
+        self.assertIn("abc123", raw)
+
+    def test_heart_none_skips_write(self):
+        chat_mod.her_heart = None
+        chat_mod.update_face("")
+        self.assertFalse(os.path.exists(chat_mod.FACE_STATE_FILE))
