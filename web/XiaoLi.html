@@ -125,6 +125,18 @@
   @keyframes blink { 50% { opacity: 0; } }
   .footer { margin-top: 8px; font-size: 12px; color: #c98aa3; }
 
+  /* ======= 最近对话 ======= */
+  .chatlog { margin-top: 14px; background: rgba(255, 255, 255, .6); border-radius: 14px;
+    padding: 8px 10px; max-height: 210px; overflow-y: auto; text-align: left; }
+  .chatlog-title { font-size: 11px; color: #c98aa3; margin-bottom: 4px; }
+  .msg { display: flex; margin: 5px 0; }
+  .msg.user { justify-content: flex-end; }
+  .msg.assistant { justify-content: flex-start; }
+  .msg .bubble { max-width: 82%; padding: 5px 10px; border-radius: 12px;
+    font-size: 13px; line-height: 1.45; word-break: break-word; }
+  .msg.user .bubble { background: #fff; color: #7a3a55; border: 1px solid #f0c2d3; }
+  .msg.assistant .bubble { background: #ffd9e5; color: #8a3050; }
+
   /* ======= 说话按钮 ======= */
   .talk-row { margin-top: 12px; display: flex; gap: 10px; justify-content: center; align-items: center; }
   .talkbtn {
@@ -197,7 +209,12 @@
     </div>
     <div id="talkStatus"></div>
   </div>
-  <div class="footer">先运行 python chat.py --voice，点🎤直接开口跟她说话</div>
+  <!-- 💬 最近对话（2026-08-23）：网页也能看到聊了啥，刷新不丢（数据在后端日记里） -->
+  <div class="chatlog" id="chatlog">
+    <div class="chatlog-title">最近对话（每 2 秒刷新 · 悬停看时间）</div>
+    <div id="chatlogBody"></div>
+  </div>
+  <div class="footer">先运行 python -m xiaoli.chat --voice（或双击 start.bat），点🎤直接开口跟她说话</div>
 </div>
 
 <script>
@@ -220,6 +237,9 @@ const MOODS = {
 };
 
 let typingToken = 0;  // 打字机"取消令牌"：新的话来了，旧打字机必须让位
+// ⚠️ 2026-08-23 修复：status 之前只在 sayByMic 里是局部变量，记住这句/传照片的
+//   回调里直接引用 status → ReferenceError → 成功也显示"连不上"。这里统一声明。
+const statusEl = document.getElementById("talkStatus");
 
 function applyState(s) {
   if (!s) return;
@@ -301,7 +321,7 @@ function sayByMic() {
       else status.textContent = "（没听清，再说一次？）";
       setTimeout(() => { status.textContent = ""; }, 4000);
     })
-    .catch(() => { status.textContent = "⚠️ 连不上本地桥——先运行 python chat.py --voice"; })
+    .catch(() => { status.textContent = "⚠️ 连不上本地桥——先运行 python -m xiaoli.chat --voice"; })
     .finally(() => {
       btn.disabled = false;
       btn.classList.remove("listening");
@@ -344,7 +364,7 @@ document.getElementById("rememberBtn").addEventListener("click", () => {
     .then(r => r.json())
     .then(d => {
       btn.textContent = d.ok ? "✅ 记住啦！" : "❌ 没记到";
-      if (d.ok) status.textContent = "📌 她说她会牢牢记着：「" + d.text + "」";
+      if (d.ok) statusEl.textContent = "📌 她说她会牢牢记着：「" + d.text + "」";
       setTimeout(() => { btn.textContent = "📌 记住这句"; }, 2500);
     })
     .catch(() => { btn.textContent = "⚠️ 连不上"; setTimeout(() => { btn.textContent = "📌 记住这句"; }, 2000); });
@@ -358,18 +378,18 @@ document.getElementById("photoInput").addEventListener("change", () => {
   const f = document.getElementById("photoInput").files[0];
   if (!f) return;
   if (f.size > 20 * 1024 * 1024) {
-    status.textContent = "📷 这张太大啦（最多 20MB）";
+    statusEl.textContent = "📷 这张太大啦（最多 20MB）";
     return;
   }
   // 直接发裸文件字节（不包 FormData）——服务端按图片魔数校验，
   // 包 multipart 的话前 4 字节是 --bo 会被误判垃圾文件（实测 400）
-  status.textContent = "📷 她在看照片…";
+  statusEl.textContent = "📷 她在看照片…";
   fetch(BRIDGE + "/photo" + BRIDGE_TOKEN(), { method: "POST", body: f })
     .then(r => r.json())
     .then(d => {
-      status.textContent = d.ok ? "📷 她看到照片了！" : "📷 传送失败：" + (d.error || "未知错误");
+      statusEl.textContent = d.ok ? "📷 她看到照片了！" : "📷 传送失败：" + (d.error || "未知错误");
     })
-    .catch(() => { status.textContent = "📷 传送失败：连不上本地桥"; })
+    .catch(() => { statusEl.textContent = "📷 传送失败：连不上本地桥"; })
     .finally(() => { document.getElementById("photoInput").value = ""; });
 });
 
@@ -383,7 +403,7 @@ document.getElementById("callBtn").addEventListener("click", () => {
     .then(r => r.json())
     .then(d => {
       btn.textContent = d.on ? "📞 通话：开" : "📞 通话：关";
-      status.textContent = d.on
+      statusEl.textContent = d.on
         ? "📞 通话中：直接说话她就回（她说话时你等她说完）"
         : "📞 通话已关";
       btn.disabled = false;
@@ -649,6 +669,35 @@ document.getElementById("faceDemoBtn").addEventListener("click", toggleFaceDemo)
 
 loadState();
 setInterval(loadState, 1000);  // 2026-08-22 2s→1s：情绪/字幕延迟减半（用户实测"延迟有点高"）
+
+// ======= 💬 最近对话（2026-08-23）：每 2 秒拉最近 20 条，变了才重绘 =======
+// 数据在后端日记里（刷新网页不丢）；HTML 转义防 LLM 输出里的 <script> 注入
+let lastChatlogKey = "";
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+function loadChatlog() {
+  fetch(BRIDGE + "/recent?n=20" + BRIDGE_TOKEN())
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok || !Array.isArray(d.messages)) return;
+      const msgs = d.messages;
+      const last = msgs.length ? msgs[msgs.length - 1] : null;
+      const key = (last ? last.role + ":" + last.time + ":" + last.content : "");
+      if (key === lastChatlogKey) return;  // 没变化不重绘（防滚动跳动）
+      lastChatlogKey = key;
+      const body = document.getElementById("chatlogBody");
+      body.innerHTML = msgs.map(m =>
+        '<div class="msg ' + (m.role === "user" ? "user" : "assistant") + '">' +
+        '<div class="bubble" title="' + escHtml(m.time) + '">' + escHtml(m.content) + "</div></div>"
+      ).join("");
+      body.scrollTop = body.scrollHeight;  // 始终滚到最新一条
+    })
+    .catch(() => {});  // 桥没开/网页单独打开时安静跳过
+}
+loadChatlog();
+setInterval(loadChatlog, 2000);
 </script>
 </body>
 </html>

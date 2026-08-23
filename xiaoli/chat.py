@@ -698,6 +698,24 @@ class WebBridge(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": bool(ok), "text": text.strip()})
             else:
                 self._json({"ok": False, "text": ""}, 400)
+        elif path == "/recent":
+            # 网页聊天记录（2026-08-23）：最近 N 条对话（刷新网页不丢）
+            # 只返回 user/assistant 文本消息；content 截断防 UI 爆掉
+            try:
+                n = max(1, min(50, int(qs.get("n", ["20"])[0])))
+            except (TypeError, ValueError):
+                n = 20
+            msgs = []
+            for m in diary.get("messages", [])[-n:]:
+                role = m.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                content = m.get("content", "")
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                msgs.append({"role": role, "content": content[:300],
+                             "time": m.get("time", "")})
+            self._json({"ok": True, "messages": msgs})
         else:
             self._json({"ok": False}, 404)
 
