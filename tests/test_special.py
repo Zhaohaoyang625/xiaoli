@@ -113,6 +113,45 @@ class TestFireOnce(unittest.TestCase):
         self.assertFalse(special.should_fire_today(datetime(2026, 2, 14, 23, 0)))
 
 
+class TestReminderRequeue(unittest.TestCase):
+    """2026-08-23「提醒必须响」补漏：执行失败（LLM 挂/网络抖）→ 放回待执行重试，
+    最多 3 次后放弃（防死循环刷 API）"""
+
+    def setUp(self):
+        if os.path.exists(proactive.REMINDERS_FILE):
+            os.remove(proactive.REMINDERS_FILE)
+
+    def test_failed_reminder_comes_back(self):
+        """executed 的提醒 requeue 后 → executed 撤销 → get_due 又能取到"""
+        proactive.add_reminders([{"id": "ab12", "content": "该吃药啦",
+                                  "trigger_at": "2026-08-20 10:00:00",
+                                  "executed": True, "dismissed": False}])
+        proactive.requeue_reminder("该吃药啦")
+        due = proactive.get_due_reminders(datetime(2026, 8, 20, 10, 5))
+        self.assertEqual(len(due), 1)
+        self.assertEqual(due[0]["content"], "该吃药啦")
+
+    def test_requeue_caps_at_three(self):
+        """连续 3 次失败 → 放弃（dismissed），不再重试"""
+        proactive.add_reminders([{"id": "cd34", "content": "去开会",
+                                  "trigger_at": "2026-08-20 10:00:00",
+                                  "executed": True, "dismissed": False}])
+        proactive.requeue_reminder("去开会")
+        proactive.requeue_reminder("去开会")
+        proactive.requeue_reminder("去开会")
+        due = proactive.get_due_reminders(datetime(2026, 8, 20, 10, 5))
+        self.assertEqual(due, [], "3 次失败后不该再重试")
+
+    def test_requeue_wrong_content_noop(self):
+        """内容不匹配 → 不动"""
+        proactive.add_reminders([{"id": "ef56", "content": "该吃药啦",
+                                  "trigger_at": "2026-08-20 10:00:00",
+                                  "executed": True, "dismissed": False}])
+        proactive.requeue_reminder("去开会")
+        due = proactive.get_due_reminders(datetime(2026, 8, 20, 10, 5))
+        self.assertEqual(due, [])
+
+
 class TestSchedulerLink(unittest.TestCase):
     def setUp(self):
         # 前面的测试把 2/14 标成已触发过了 → 拨回前一天，保证本组可触发
@@ -152,6 +191,24 @@ class TestSchedulerLink(unittest.TestCase):
         sched._tick(datetime(2026, 8, 21, 8, 0))
         asks = [e for e in fired if "他的生日" in e[1]]
         self.assertEqual(len(asks), 1)
+
+
+class TestSleepIntegrateTrigger(unittest.TestCase):
+    """睡前回想触发（2026-08-23 学 Letta sleep-time）：23 点后 tick 才调用
+    on_sleep_integrate，23 点前不打扰；未注册回调不炸"""
+
+    def test_called_after_23_only(self):
+        calls = []
+        sched = proactive.Scheduler(lambda *a: None,
+                                    on_sleep_integrate=lambda now: calls.append(now))
+        sched._tick(datetime(2026, 8, 23, 22, 30))
+        self.assertEqual(calls, [], "22:30 她还没睡完，不该整合")
+        sched._tick(datetime(2026, 8, 23, 23, 0))
+        self.assertEqual(len(calls), 1, "23:00 她睡了 → 该整合一次")
+
+    def test_no_callback_safe(self):
+        sched = proactive.Scheduler(lambda *a: None)  # 没注册睡前回想
+        sched._tick(datetime(2026, 8, 23, 23, 30))  # 不炸
 
 
 if __name__ == "__main__":

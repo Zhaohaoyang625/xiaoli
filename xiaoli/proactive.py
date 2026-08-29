@@ -41,6 +41,7 @@ DAILY_PROACTIVE_BUDGET = 2
 #   但你在她随时秒回；早上她自然醒来（问候/早安照常）。提醒除外（答应的事必须履行）
 NIGHT_SILENT_START_HOUR = 22
 NIGHT_SILENT_END_HOUR = 8
+SLEEP_INTEGRATE_HOUR = 23  # 睡前回想触发点（她"睡了"以后整理今天的记忆）
 
 # 节奏窗口（小时）：起床后/午间/傍晚/睡前
 WINDOWS = [
@@ -145,6 +146,31 @@ def get_missed_reminders(now=None):
     return missed
 
 
+def requeue_reminder(content):
+    """提醒没响成功（LLM/网络挂）→ 放回待执行队列，下个 tick 重试。
+    2026-08-23「提醒必须响」补漏：get_due_reminders 取出即标 executed，
+    handle_event 内部失败（如 LLM 超时）不会重试 → 提醒静默丢。
+    最多重试 3 次后放弃（终端打印）——连续失败几乎必是网络挂了，
+    恢复后重新说一次提醒即可（防死循环刷 API）。"""
+    data = _load_json(REMINDERS_FILE, [])
+    changed = False
+    for r in reversed(data):
+        # 匹配"曾被执行但没响成功"的提醒：第一次时 executed=True；
+        # 之后 executed 已撤销 → 靠 retries 标记继续匹配（retries≥1）
+        if (r.get("executed") or r.get("retries")) \
+                and not r.get("dismissed") and r.get("content") == content:
+            r["retries"] = r.get("retries", 0) + 1
+            if r["retries"] >= 3:
+                r["dismissed"] = True  # 3 次都没响 → 放弃自动重试
+                print(f"  [提醒「{content}」连续 {r['retries']} 次没响成功，不再自动重试]")
+            else:
+                r["executed"] = False  # 下个 tick 会重新取出 → 再试一次
+            changed = True
+            break  # 只放回最新一条（同内容多条是罕见情况）
+    if changed:
+        _save_json(REMINDERS_FILE, data)
+
+
 def dismiss_reminders(ids):
     data = _load_json(REMINDERS_FILE, [])
     for r in data:
@@ -234,10 +260,6 @@ def set_recording(recording):
     """录音期间调用：你在说话 → 她不抢话（打断机制的核心）"""
     global _recording
     _recording = bool(recording)
-
-
-def is_recording():
-    return _recording
 
 
 def should_idle_chat(now=None):
@@ -375,8 +397,11 @@ def cancel_outings_if_back(text):
 class Scheduler:
     """后台调度器：每秒检查一次节奏窗口和到期提醒，到点调用回调。"""
 
-    def __init__(self, on_event):
+    def __init__(self, on_event, on_sleep_integrate=None):
         self.on_event = on_event  # 回调(event_type, content, is_user_simulated)
+        # 2026-08-23 睡前回想（Letta sleep-time compute）：她睡了以后
+        # 把今天聊的整理成记忆。不是"事件"，不经过 on_event（不出声）
+        self.on_sleep_integrate = on_sleep_integrate
         self._stop = threading.Event()
 
     def start(self):
@@ -462,6 +487,15 @@ class Scheduler:
                         "'寶貝～吃得好吗？人多不多？'），语气要软、要自然，别太正式",
                         now.strftime("%H:%M"),
                     )
+        # 7. 睡前回想（2026-08-23 学 Letta Sleep-time Compute）：23 点后她"睡了"，
+        #    把过去几天的对话整理成记忆（daily + summary 合并）。不是事件、不出声。
+        #    注意在 passive 判断**外面**——她睡了（passive）反而正是干活的时候。
+        #    幂等：整合过的日子跳过（daily 键在）；防重入由 chat.py 包装层负责
+        if self.on_sleep_integrate and now.hour >= SLEEP_INTEGRATE_HOUR:
+            try:
+                self.on_sleep_integrate(now)
+            except Exception as e:
+                print(f"[睡前回想出错：{e}]")
 
     def _refresh_world_bg(self):
         """后台刷世界简报（v2.3）：联网 3~8 秒，异常静默——刷不到就保持旧简报，
@@ -545,6 +579,3 @@ def promise_hint(user_input):
     )
 
 
-def clear_promise():
-    """清理工作槽（用不到的时候）"""
-    _save_json(PROMISE_FILE, None)

@@ -146,5 +146,71 @@ class TestWebBridgeAuth(unittest.TestCase):
         self.assertEqual(origins, ["http://127.0.0.1:8080"])  # 我们的页面正常放行
 
 
+class TestStaticServing(unittest.TestCase):
+    """S4：Live2D 白名单静态服务（2026-08-23 修复 file:// 模型加载 Network error）。
+    只服务 web/live2d/ + web/vendor/；穿越/白名单外一律拒绝；文件无敏感 → CORS 全放行"""
+
+    def _h(self, path):
+        from xiaoli import chat
+        h = chat.WebBridge.__new__(chat.WebBridge)
+        h.path = path
+        h.wfile = mock.Mock()
+        h.send_response = mock.Mock()
+        h.send_header = mock.Mock()
+        h.end_headers = mock.Mock()
+        h.headers = {}
+        return h
+
+    def test_serve_live2d_model(self):
+        """/live2d/* → 返回真实文件内容 + CORS 全放行 + 正确 Content-Type"""
+        from xiaoli import chat
+        h = self._h("/live2d/shizuku/shizuku.model.json")
+        with mock.patch("xiaoli.chat.os.path.isfile", return_value=True), \
+             mock.patch("xiaoli.chat.open", mock.mock_open(read_data=b'{"x":1}')):
+            self.assertTrue(chat.WebBridge._serve_static(h, "/live2d/shizuku/shizuku.model.json"))
+        h.send_response.assert_called_once_with(200)
+        types = {c[0][1] for c in h.send_header.call_args_list}
+        self.assertIn("*", types)  # CORS 全放行
+        self.assertIn("application/json", types)
+        h.wfile.write.assert_called_once_with(b'{"x":1}')
+
+    def test_serve_vendor_js(self):
+        """/vendor/*（live2d.min.js 等引擎库）同样放行"""
+        from xiaoli import chat
+        h = self._h("/vendor/live2d.min.js")
+        with mock.patch("xiaoli.chat.os.path.isfile", return_value=True), \
+             mock.patch("xiaoli.chat.open", mock.mock_open(read_data=b"js")):
+            self.assertTrue(chat.WebBridge._serve_static(h, "/vendor/live2d.min.js"))
+
+    def test_traversal_blocked(self):
+        """路径穿越 /live2d/../../xiaoli/config.py → 拒绝（S2 教训回归）"""
+        from xiaoli import chat
+        h = self._h("/live2d/../../xiaoli/config.py")
+        with mock.patch("xiaoli.chat.os.path.isfile") as m:
+            self.assertFalse(chat.WebBridge._serve_static(h, "/live2d/../../xiaoli/config.py"))
+            m.assert_not_called()  # 穿越路径根本不碰文件系统
+
+    def test_whitelist_only(self):
+        """白名单外（/data/face_state.js 含 token、/ 首页）→ 拒绝，绝不静态输出"""
+        from xiaoli import chat
+        h = self._h("/data/face_state.js")
+        self.assertFalse(chat.WebBridge._serve_static(h, "/data/face_state.js"))
+        h2 = self._h("/")
+        self.assertFalse(chat.WebBridge._serve_static(h2, "/"))
+        h3 = self._h("/XiaoLi.html")
+        self.assertFalse(chat.WebBridge._serve_static(h3, "/XiaoLi.html"))
+
+    def test_do_get_static_before_auth(self):
+        """do_GET：静态分支在鉴权之前——Live2D fetch 无 token 也必须能读到（文件无敏感）"""
+        from xiaoli import chat
+        h = self._h("/live2d/x.model.json")
+        with mock.patch.object(chat, "_bridge_token", "secret123"), \
+             mock.patch.object(chat.WebBridge, "_serve_static", return_value=True) as ss, \
+             mock.patch.object(h, "_json") as js:
+            chat.WebBridge.do_GET(h)
+            ss.assert_called_once_with("/live2d/x.model.json")
+            js.assert_not_called()  # 没走 403
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -19,6 +19,7 @@
 
 import os
 import re
+import threading
 
 import miniaudio
 import numpy as np
@@ -32,6 +33,20 @@ from xiaoli import sfx
 from xiaoli import voice
 
 SONGS_DIR = os.path.join(paths.DATA_DIR, "songs")
+
+ANNOUNCE_WAIT_TIMEOUT = 30  # 报歌名播完的最长等待（on_done 兜底几乎必触发，这是双保险）
+
+
+def _speak_wait(text):
+    """播报歌名并等她说完（2026-08-23 竞态修复）：voice.play_speech 非阻塞，
+    直接播歌的话 sd.play 是"替换"语义——歌名常被歌顶掉/歌的开头被歌名顶掉。
+    on_done 在播完/失败/被打断都会触发 → 不会卡死；播放系统本身炸了 → 不等继续演。"""
+    _done = threading.Event()
+    try:
+        voice.play_speech(text, on_done=_done.set)
+    except Exception:
+        _done.set()
+    _done.wait(ANNOUNCE_WAIT_TIMEOUT)
 
 # 触发词：他叫"她"唱歌（"我想听你唱歌"也要触发——她要唱给他听）
 TRIGGER_RE = re.compile(r"唱((一|壹)?(首|支|段|个|只))?歌|唱给我听|来一首|来一段|唱一个|K歌|k歌")
@@ -96,9 +111,9 @@ def _announce(songs):
             title, path = songs[0]
         if not line:
             line = f"齁～那我唱《{title}》给你听齁～"
-        voice.play_speech(line)
+        _speak_wait(line)  # 报歌名说完再开唱（竞态修复：不等会被歌顶掉）
     except Exception:
-        voice.play_speech(f"齁～那我唱《{title}》给你听齁～")
+        _speak_wait(f"齁～那我唱《{title}》给你听齁～")
     return title, path
 
 

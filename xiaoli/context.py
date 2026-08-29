@@ -279,6 +279,56 @@ def _summarize(old_messages, existing_summary=""):
     return summary, emotion_line
 
 
+def sleep_time_integrate(diary, now=None):
+    """夜间睡前回想（2026-08-23 学 Letta Sleep-time Compute，arXiv:2504.13171）：
+    主对话线程只负责实时对话，记忆整合放到"睡眠期"后台——她晚上睡了，
+    把过去几天的对话悄悄整理成记忆（daily 每日一句话 + summary 链式合并 + 情绪线），
+    然后从 messages 里移除已整合的旧消息（记忆已入摘要，消息本体压缩掉）。
+    收益：①daily 不再等"对话超长压缩"才生成（日常 daily 一直空着的问题根治）——
+    每晚必有，第二天她"翻旧账"有出处；②messages 保持稳定长度；③真人感：
+    睡前回想今天；④对话线程零打扰（Letta 论文：成本降 5 倍、状态基准 +18%）。
+    幂等/安全：只整合"过去的日期"（今天还没过完，不与实时对话打架）；
+    已生成 daily 的日期跳过（压缩时处理过）；**两阶段提交**——先算完全部
+    LLM 摘要（不写状态），任何一天失败 → 什么都不提交，明天再试，记忆不丢。
+    返回 (diary, 是否整合了东西)。"""
+    if now is None:
+        now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    pending_days = sorted({(m.get("time") or "")[:10] for m in diary.get("messages", [])
+                           if (m.get("time") or "")[:10] and (m.get("time") or "")[:10] < today})
+    pending_days = [d for d in pending_days if d not in diary.get("daily", {})]
+    if not pending_days:
+        return False  # 没有待整合的日子（都整合过 / 没有旧消息）
+    # 第一阶段：全部 LLM 调用先算完（不写状态）——任何失败 → 不提交，明天再试
+    new_daily = {}
+    for day in pending_days:
+        day_msgs = [m for m in diary["messages"] if (m.get("time") or "").startswith(day)]
+        try:
+            new_daily[day] = _summarize_day(day_msgs)
+        except Exception as e:
+            print(f"[睡前回想：{day} 摘要失败，明天再试：{e}]")
+            return False
+    past = [m for m in diary["messages"] if (m.get("time") or "")[:10] < today]
+    try:
+        summary, emotion_line = _summarize(past, diary.get("summary", ""))
+    except Exception as e:
+        print(f"[睡前回想：记忆合并失败，明天再试：{e}]")
+        return False
+    # 第二阶段：全部成功 → 统一提交
+    diary.setdefault("daily", {})
+    for day, one_line in new_daily.items():
+        diary["daily"][day] = one_line
+    keys = sorted(diary["daily"].keys())
+    for k in keys[:-7]:
+        del diary["daily"][k]  # 与 compress 一致：只留最近 7 天
+    diary["summary"] = summary
+    if emotion_line and emotion_line != "（无）":
+        diary["emotion_line"] = emotion_line
+    diary["messages"] = [m for m in diary["messages"] if (m.get("time") or "")[:10] >= today]
+    print(f"[睡前回想：{len(pending_days)} 天的对话整理进记忆了]")
+    return True
+
+
 def _summarize_day(messages):
     """把一组消息压成一句话（v2 M6：每日一句话摘要）"""
     client = llm.get_client()

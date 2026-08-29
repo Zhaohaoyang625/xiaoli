@@ -33,6 +33,8 @@ from xiaoli import tts_local  # 本地合成（2026-08-22：Qwen3-TTS 声音克�
 from xiaoli import call_mode  # O2 通话模式（2026-08-22）
 from xiaoli import vision  # 看照片（2026-08-23：DeepSeek 视觉模型，base64 内联）
 from xiaoli import embed  # 语义记忆（2026-08-23：bge-small-zh，启动自检用）
+from xiaoli import vad  # 流式人声检测（2026-08-23 批2：Silero VAD 换能量阈值）
+from xiaoli import toast  # 桌面通知（2026-08-24：她主动找你时 Windows 弹窗）
 from xiaoli.persona import SYSTEM_PROMPT
 
 # 日记/心的写入锁：后台主动消息线程和主聊天线程都写日记，防并发错乱
@@ -64,28 +66,53 @@ _bridge_token = ""
 sys.stdout.reconfigure(encoding='utf-8')
 
 
+# 实时信息词（2026-08-23 用户实测"回复延迟长"的元凶之一：
+# web_search 每轮都挂着 → flash 常自己决定上网搜 → 每轮多 2~5 秒 + 3 分钱搜索费。
+# 收敛：只有问到"实时性信息"（天气/新闻/热搜/股价…）才挂搜索工具，
+# 日常聊天直接走 Chat Completions 快路径——搜索功能还在，只是不再拖累每轮）
+_SEARCH_WORDS = ["天气", "新闻", "热搜", "股价", "股票", "汇率", "油价", "房价",
+                 "比赛", "比分", "赛果", "票房", "新歌", "新片", "上映", "首映",
+                 "限号", "台风", "地震", "疫情", "星座", "运势", "股市"]
+
+
+def _needs_search(messages):
+    """这轮要不要挂联网搜索？只看最后一条用户消息（历史里提过天气 ≠ 这轮要搜）"""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            return any(w in m.get("content", "") for w in _SEARCH_WORDS)
+    return False
+
+
 def call_xiaoli(messages, retries=2):
     """调用DeepSeek大脑，返回小李的回复。
-    v2.1（2026-08-22）：主对话切官方 Responses API + 联网搜索（web_search auto）——
-    模型自己判断这轮要不要上网（天气/新闻/热梗/股价等实时信息自动搜，日常聊天不搜）。
-    Responses 偶发异常 → 自动降级回旧 Chat Completions 接口（永远有大脑）。
+    v2.1（2026-08-22）：问到实时信息（天气/新闻/热搜…）→ Responses API + 服务端联网搜索，
+    模型自己决定要不要上网；日常聊天 → Chat Completions 快路径（不挂搜索，更快更省）。
     实测教训：flash 偶发返回空内容 → 空或异常时自动重试（学自 MISS 三级回退的兜底思想）"""
     client = llm.get_client()
+    need_search = _needs_search(messages)
     for attempt in range(retries + 1):
         try:
-            try:
-                # 官方新接口：Responses + 服务端联网搜索（2026-08-22 实测：搜索一次约3分钱，
-                # 搜索结果自动进上下文；tool_choice=auto = 模型自己决定要不要搜）
-                response = client.responses.create(
-                    model=config.DEEPSEEK_MODEL,
-                    input=messages,
-                    tools=[{"type": "web_search"}],
-                    tool_choice="auto",
-                    text={"format": {"type": "json_object"}},  # 强制模型输出JSON
-                )
-                content = response.output_text
-            except Exception:
-                # 降级路径：Responses 接口异常（网络/兼容问题）→ 回退旧接口，对话不断
+            if need_search:
+                # 官方新接口：Responses + 服务端联网搜索（2026-08-22 实测：搜索一次约3分钱）
+                try:
+                    response = client.responses.create(
+                        model=config.DEEPSEEK_MODEL,
+                        input=messages,
+                        tools=[{"type": "web_search"}],
+                        tool_choice="auto",
+                        text={"format": {"type": "json_object"}},  # 强制模型输出JSON
+                    )
+                    content = response.output_text
+                except Exception:
+                    # 搜索路径挂了 → 降级快路径（不带搜索），对话不断
+                    response = client.chat.completions.create(
+                        model=config.DEEPSEEK_MODEL,
+                        messages=messages,
+                        response_format={"type": "json_object"},  # 强制模型输出JSON
+                    )
+                    content = response.choices[0].message.content
+            else:
+                # 日常聊天快路径：Chat Completions（2026-08-23：不挂搜索工具 → 更快更省）
                 response = client.chat.completions.create(
                     model=config.DEEPSEEK_MODEL,
                     messages=messages,
@@ -236,6 +263,12 @@ _speak_guard = threading.Lock()
 # 后台线程写、主循环读+清——赋值原子性足够，竞态窗口极小，可接受
 _unfinished = []
 
+# A-P1-3 打断续说·正说到哪（2026-08-23）：打断瞬间她正在播的那句说到哪了
+# （voice.interrupted_tail() 按已播时长比例估算残余）——独立变量：
+# 不能塞 _unfinished（349 行 `_unfinished = list(conts[i:])` 会覆盖）。
+# 主循环写（打断点）、读+清（1160 块注入）——同 _unfinished 的原子性约定
+_interrupted_tail = ""
+
 
 def say_with_continuation(prefix, inner, spoken, continuation=(), _interrupt=False, _wait=False):
     """显示她说的话（+内心话）→ 播放语音 → 如果她还有想说的，一句句自然说出来。
@@ -265,10 +298,13 @@ def say_with_continuation(prefix, inner, spoken, continuation=(), _interrupt=Fal
     display_text = _strip_pause_tags(_strip_reminder_tags(spoken))
     print(f"小李{prefix}：{display_text}")
     update_face(display_text)
-    # 上限 3 条（防失控保险：模型再怎么话痨也不会无上限；情绪激动时的连珠炮
-    # 是正常的，平静时的 2-3 条由 persona 教法"大多数 []"控制）
+    # 补话上限（2026-08-23 用户实测"话多、必须听完"）：情绪裁剪——
+    # 平静时最多补 1 条（LLM 爱写 2-3 条，教法管不住，程序钉死）；
+    # 吵架/委屈/兴奋等情绪激动时才允许连珠炮（最多 3 条，真人吵架确实一句接一句）
+    _hot = (her_heart or {}).get("mood", {}).get("primary")
+    _conts_max = 3 if _hot in ("angry", "jealous", "sad", "anxious", "melancholy", "excited") else 1
     conts = [_strip_pause_tags(_strip_reminder_tags(c)) for c in (continuation or ())
-             if isinstance(c, str) and c.strip()][:3]
+             if isinstance(c, str) and c.strip()][:_conts_max]
     # 用"播完回调"而不是 wait：播放不阻塞主循环，你随时插话都能立即生效。
     # 主话播放完（或被打断）→ 回调再决定补不补话；这轮全部结束 → 释放语音互斥锁
     def _finish():
@@ -300,6 +336,27 @@ def say_with_continuation(prefix, inner, spoken, continuation=(), _interrupt=Fal
 _COLD_WORDS = ("感冒", "着凉", "喉咙", "嗓子", "咳嗽", "发烧")
 
 
+# 连珠炮逐句情绪的"委屈收尾"特征词（2026-08-23 自研方案）：
+# 连珠炮的结构是**程序**钉死的（先翻旧账→控诉→委屈收尾），LLM 只填文本——
+# 所以程序扫文本特征就能给每句标情绪，不赌 LLM 自觉输出 [joy] 式标签
+# （对比 OLV 的 LLM 内联标签：flash 会漏标，结构钉死才稳）。
+# 收尾句带委屈味（"呜…"）→ sad；否则还是气头上 → angry
+_SAD_CONT_WORDS = ("呜", "委屈", "哭", "泪", "伤心", "难过", "鼻子酸")
+
+
+def _cont_emotion(cont, idx, total, base):
+    """连珠炮逐句情绪：给每条补话标"这句该用什么表情/语气说"。
+    只在 angry 连珠炮场景启用（程序检测到高强度生气才注入连珠炮指令，
+    所以程序知道每条补话的意图）：收尾句带委屈特征 → sad（音调低语速慢，
+    真人吵完"呜…"的余韵）；其余 → angry（翻旧账/控诉都还在气头上）。
+    平静补话 → 原情绪（不过度表演，正常聊天不需要情绪过山车）。
+    返回表情名：语音 emotion 参数 + 网页表情都用它（逐句换表情，不是整段一个）"""
+    if base == "angry" and idx == total - 1 and any(
+            w in cont for w in _SAD_CONT_WORDS):
+        return "sad"
+    return base
+
+
 def _say_continuations(conts):
     """主话说完后的自然补话（在播放线程里跑，不卡对话）：一句句说出。
     停顿由情绪驱动（实测教训 2026-08-20 用户："一句话说完后再说下一句"）：
@@ -310,30 +367,42 @@ def _say_continuations(conts):
     你打断过她 / 她判断没话补 / 主动开关关了 → 安静"""
     global _interrupted
     # 情绪驱动节奏（读她的"心"）：吵架/委屈/兴奋时真人会一句接一句，平静时才慢慢补
+    # 2026-08-23 用户实测"间隔有点长"：平静 3.0~4.5 太拖（每条补话要等 4 秒）；
+    # 下限保 2.0s（实测：<1.5s 机关枪、"没说完一句就抢着说"），上沿砍掉
     mood = (her_heart or {}).get("mood", {}).get("primary")
     if mood in ("angry", "jealous", "sad", "anxious", "melancholy", "excited"):
-        pause_range = (2.0, 3.0)  # 连珠炮：一句说完缓口气再蹦下一句（比平静快但听得出"说完了"）
+        pause_range = (1.5, 2.5)  # 连珠炮：一句说完缓口气再蹦下一句（比平静快但听得出"说完了"）
     else:
-        pause_range = (3.0, 4.5)  # 想了想再说
+        pause_range = (2.0, 3.0)  # 想了想再说（原 3.0~4.5 太拖）
     try:
+        prev_text = ""  # 上一条（主话或补话）——C-P1-3 问句尾 → 等她说下去前多留一拍
         for i, cont in enumerate(conts):
             if _interrupted or not proactive.is_proactive_enabled():
                 # O7 打断续说：没说完的话记下来（下一轮她"还记得要说什么"）
                 global _unfinished
                 _unfinished = list(conts[i:])
                 return
-            time.sleep(random.uniform(*pause_range))  # 思考停顿（随机：真人没准点）
+            # 真人感：问句（？/吗/呢/吧 尾）说完会等对方答，不会立刻自说自话——
+            # 补话间隔取上沿（激动 3.0s / 平静 4.5s），不随机到短端
+            if prev_text.rstrip().endswith(("？", "?", "吗", "呢", "吧")):
+                time.sleep(pause_range[1])
+            else:
+                time.sleep(random.uniform(*pause_range))  # 思考停顿（随机：真人没准点）
+            prev_text = cont
             if _interrupted:
                 _unfinished = list(conts[i:])
                 return
+            # 连珠炮逐句情绪（2026-08-23）：程序按序号+文本特征给每句标情绪——
+            # 收尾委屈句 sad、其余 angry；网页表情跟着逐句换，语音语气也逐句变
+            em = _cont_emotion(cont, i, len(conts), mood)
             print(f"小李（接着说）：{cont}")
-            update_face(cont)
+            update_face(cont, mood_override=em)
             if voice_on:
                 # 等这句播完（或被你打断）再进下一句，避免语音叠在一起
                 played = threading.Event()
                 voice.play_speech(cont, on_done=played.set,
-                                  on_started=lambda: update_face(""),  # 口型同步：补话也在说
-                                  emotion=(her_heart or {}).get("mood", {}).get("primary"))
+                                  on_started=lambda em=em: update_face("", mood_override=em),  # 口型同步：补话也在说
+                                  emotion=em)
                 played.wait()
         # 拟声收尾（2026-08-22）：这轮话说完了，情绪的自然余韵——
         # 低落/委屈 → 30% 叹口气；开心 → 15% 轻笑一声。被打断了就闭嘴（真人被打断也不补叹气）。
@@ -355,7 +424,6 @@ _keep_talking_rounds = 0
 # 第一轮等你 5 秒；越到后面越耐心（5/8/12）——像真人：等你一会儿→说一句→
 # 再耐心等你→再说一句，而不是死板地每次都等同样久
 KEEP_TALKING_WAITS = [5, 8, 12]
-KEEP_TALKING_MAX_ROUNDS = len(KEEP_TALKING_WAITS)  # 连续主动上限（真人也会说累了停下等你回应）
 
 
 def _keep_talking_waits():
@@ -527,7 +595,8 @@ def _show_facts():
 
 
 def _show_heart():
-    """终端「心情」：她现在的心（情绪/程度/好感度/原因）"""
+    """终端「心情」：她现在的心（情绪/程度/好感度/原因）+ 变迁史（B-P2 2026-08-23）——
+    「她为什么这样」的长期解：查最近 10 条心情怎么一路变过来的（时间/情绪/怨气/原因）"""
     m = her_heart.get("mood", {})
     primary = m.get("primary", "neutral")
     inten = m.get("intensity", 0)
@@ -536,6 +605,13 @@ def _show_heart():
     print(f"  （她现在的心情：{name}｜程度 {inten}｜好感度 {a}）")
     for c in (m.get("causes") or [])[:3]:
         print(f"    因为：{c}")
+    log = her_heart.get("mood_log") or []
+    if log:
+        print("  ── 心情变迁（新→旧）──")
+        for e in reversed(log[-10:]):
+            print(f"    {e['t']} {_MOOD_CN.get(e['mood'], e['mood'])}"
+                  f"（程度{e['i']}）怨气{e['g']}｜{e['c']}")
+        print("  ────────────────")
 
 
 def _show_brief():
@@ -632,13 +708,15 @@ def handle_photo(path):
     proactive.mark_activity()  # 你发照片了，她不用急着找话
 
 
-def handle_event(event_type, content, extra):
+def handle_event(event_type, content, extra=""):
     """B.2 后台调度器回调：小李主动找你说话（节奏窗口到点 / 提醒到点）。
     v2 P3 重构：主动事件走独立小调用（AIRI spark:notify）——不进主对话流；
     v2 P1 主动挂钩记忆（产品组）：开口前先带"她记得的关于他的事"，
     有值得说的才开口（SILENT = 安静陪着），不说就不用记日记。
     语音互斥：正在播回复/其他主动 → 主动事件让位（下个 tick 会再触发，不丢）；
-    提醒例外（必须响）→ 走 _wait 等当前说完，不打断。"""
+    提醒例外（必须响）→ 走 _wait 等当前说完，不打断。
+    extra：Scheduler 回调契约第三参（触发时间），历史死参数——不要删！
+    （2026-08-29 僵尸清理时删了它 + 没同步调用点 → 调度器每秒 TypeError 刷屏）"""
     proactive.mark_activity()  # 她开口了 = 互动，空闲计时器清零
     # 提前让位检查（省 API 钱：正在播别的就别调 LLM 合成话了）
     if voice_on and _speak_guard.locked() and event_type != "提醒":
@@ -646,7 +724,6 @@ def handle_event(event_type, content, extra):
         return
     # v2 P1 主动挂钩记忆：双路召回"她记得的关于他的事"（最近话题 + 事件关键词），
     # 合并去重后交给独立小调用——有值得说的才开口，不说就安静（少而真）
-    event_msg = proactive.build_event_message(event_type, content)
     rec1 = memory_mod.recall(facts, content, top=3)
     _recent_input = ""
     for m in reversed(diary.get("messages", [])):
@@ -670,9 +747,17 @@ def handle_event(event_type, content, extra):
             # 必须有声（程序兜底软话顶上，这是"她至少会惦记你"的保险丝）
             if event_type == "闲聊":
                 spoken = proactive.pick_idle_fallback()
+            elif event_type == "提醒":
+                # 提醒必须响（2026-08-23 漏洞修复）：LLM 偶发 SILENT → 提醒被静默吞掉
+                # = 答应的事没做（"提醒是承诺"设计：e2e 场景5 过是因为有上下文时 LLM
+                # 会说，但偶发 SILENT 时提醒就静音了）→ 程序兜底直接说提醒内容
+                spoken = f"齁～差点忘了，{content}"
             else:
                 print("  （她安静地陪着你…）")
                 return
+        # 桌面通知（2026-08-24）：她确定要开口了 → 弹系统 toast（你在别的窗口
+        # 也能看到）。后台线程弹，不阻塞说话。夜间她"睡了"只有提醒会走到这（例外）
+        toast.show("小李找你", spoken)
         print("\n" + "=" * 30)
         # 提醒必须响（等当前说话流说完，不打断）；其他主动事件撞上正在播的话 → 让位
         say_with_continuation("（主动来找你）", "", spoken, (),
@@ -686,6 +771,10 @@ def handle_event(event_type, content, extra):
             context.save_diary(diary)
     except Exception as e:
         print(f"\n[主动消息失败：{e}]")
+        if event_type == "提醒":
+            # 提醒必响（2026-08-23 补漏）：get_due_reminders 取出即标 executed，
+            # 这次没响（LLM 挂/网络抖）→ 放回待执行队列，下个 tick 自动重试（≤3 次）
+            proactive.requeue_reminder(content)
 
 
 diary = None
@@ -702,31 +791,41 @@ def mark_user_speak():
     _last_user_speak = datetime.now()
 
 FACE_STATE_FILE = os.path.join(paths.DATA_DIR, "face_state.js")
+# 2026-08-23 修复（网页 token 断链）：网页相对路径 data/face_state.js 基于 web/ 目录，
+# 实际文件却写在根 data/ → web/data/face_state.js 不存在 → script 加载 404 → token 永远
+# 拿不到 → 网页通话/记住/传照片/打字聊天全部 403（v2 结构重组遗留，网页端静默失败）。
+# 修复：写两份（根 data/ 供后端/历史读取 + web/data/ 供 file:// 页面 script 标签读）。
+WEB_FACE_STATE_FILE = os.path.join(paths.WEB_DIR, "data", "face_state.js")
 
 
-def update_face(spoken_text):
+def update_face(spoken_text, mood_override=None):
     """D 形象层：把她的心情/好感/说的话写入形象状态文件。
-    用 JSONP 格式（window.XIAOLI_STATE=...）——本地 file:// 打开页面也能读，无CORS问题"""
+    用 JSONP 格式（window.XIAOLI_STATE=...）——本地 file:// 打开页面也能读，无CORS问题
+    mood_override（2026-08-23 连珠炮逐句情绪）：临时覆盖表情——收尾委屈句写 sad、
+    其余写 angry，网页 Live2D 跟着逐句换脸；None = 用她此刻的"心"（默认行为不变）"""
     if her_heart is None:
         return
     state = {
-        "mood": her_heart["mood"]["primary"],
+        "mood": mood_override or her_heart["mood"]["primary"],
         "intensity": her_heart["mood"]["intensity"],
         "affection": her_heart["affection"],
         "time": context.now_str(),
         "voice": voice_on,  # 网页🔊开关显示用
         "proactive": proactive.is_proactive_enabled(),  # 网页💬开关显示用
+        "call_on": _call_mode is not None and _call_mode.active,  # 📞 按钮跟随真实监听状态（线程异常退出/卡死重建时网页能感知）
         "speaking_until": voice.speaking_until(),  # v2 口型同步：她说话截止时间戳（网页驱动嘴巴动）
         "bridge_token": _bridge_token,  # ⚠️ 安全修复：网页桥鉴权 token（恶意网页读不到）
     }
     if spoken_text:  # 空文本（如切语音开关）不覆盖网页字幕
         state["text"] = spoken_text
-    try:
-        os.makedirs(os.path.dirname(FACE_STATE_FILE), exist_ok=True)
-        with open(FACE_STATE_FILE, "w", encoding="utf-8") as f:
-            f.write("window.XIAOLI_STATE = " + json.dumps(state, ensure_ascii=False) + ";")
-    except OSError:
-        pass  # 形象面板写不进去不打断对话
+    _s = "window.XIAOLI_STATE = " + json.dumps(state, ensure_ascii=False) + ";"
+    for _f in (FACE_STATE_FILE, WEB_FACE_STATE_FILE):  # 双写：根 data/（后端）+ web/data/（file:// 页面读）
+        try:
+            os.makedirs(os.path.dirname(_f), exist_ok=True)
+            with open(_f, "w", encoding="utf-8") as f:
+                f.write(_s)
+        except OSError:
+            pass  # 形象面板写不进去不打断对话
 
 
 def terminal_reader():
@@ -745,8 +844,62 @@ class WebBridge(http.server.BaseHTTPRequestHandler):
     /set_voice 网页点🔊开关 → 切换她说的话念不念出来
     只监听 127.0.0.1（仅本机），CORS 放行 file:// 页面"""
 
+    # 2026-08-23 静态白名单（Live2D 模型加载）：file:// 页面 fetch 本地文件被浏览器
+    # 禁止（"模型加载失败：Network error"）→ 模型/引擎库改走本桥 HTTP 加载。
+    # ⚠️ 安全（S2 路径穿越教训）：只映射 web/live2d/ + web/vendor/ 两个目录，
+    #    face_state.js（含会话 token）等敏感文件绝不在服务范围——恶意网页偷不到 token。
+    #    文件无敏感信息 → CORS 全放行（PIXI 跨源读）；带路径穿越防护（见 _serve_static）。
+    _STATIC_ROOTS = {
+        "/live2d/": ("live2d",),
+        "/vendor/": ("vendor",),
+    }
+    _STATIC_TYPES = {
+        ".json": "application/json",
+        ".js": "application/javascript",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".moc3": "application/octet-stream",
+    }
+
+    def _serve_static(self, path):
+        """白名单静态文件服务 → 返回 True 且已响应；否则 False（继续走鉴权 API）"""
+        import os
+        root = None
+        for prefix, rel in self._STATIC_ROOTS.items():
+            if path.startswith(prefix):
+                root = rel
+                break
+        if root is None:
+            return False
+        rel = path[len(prefix):].replace("/", os.sep)
+        if not rel or rel.startswith(".."):
+            return False
+        full = os.path.normpath(os.path.join(paths.WEB_DIR, *root, rel))
+        base = os.path.normpath(os.path.join(paths.WEB_DIR, *root))
+        # 路径穿越防护：解析后必须仍在白名单根内（S2 教训：曾能读出项目根任意文件）
+        if full != base and not full.startswith(base + os.sep):
+            return False
+        if not os.path.isfile(full):
+            return False
+        ext = os.path.splitext(full)[1].lower()
+        try:
+            with open(full, "rb") as f:
+                data = f.read()
+        except OSError:
+            return False
+        self.send_response(200)
+        self.send_header("Content-Type", self._STATIC_TYPES.get(ext, "application/octet-stream"))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        return True
+
     def do_GET(self):
         path = self.path.split("?")[0]
+        if self._serve_static(path):
+            return
         # ⚠️ 会话鉴权（2026-08-22 安全修复）：不带 token 直接 403。
         #   之前零鉴权——任意网页可静默触发录音窃听/注入记忆/开常开监听。
         #   token 由 face_state.js 下发，恶意网页（其他域/file:// 下别的页面）读不到。
@@ -821,6 +974,17 @@ class WebBridge(http.server.BaseHTTPRequestHandler):
                 msgs.append({"role": role, "content": content[:300],
                              "time": m.get("time", "")})
             self._json({"ok": True, "messages": msgs})
+        elif path == "/heart":
+            # 网页「她的心」（2026-08-23 B-P2）：心情/好感/怨气 + 变迁史——
+            # 网页端也能看懂她为什么这样（终端「心情」命令的网页版）
+            _m = (her_heart or {}).get("mood", {})
+            self._json({"ok": True,
+                        "mood": _m.get("primary", "neutral"),
+                        "intensity": _m.get("intensity", 0),
+                        "affection": (her_heart or {}).get("affection", 60),
+                        "grudge": (her_heart or {}).get("grudge", 0),
+                        "causes": (_m.get("causes") or [])[:3],
+                        "log": ((her_heart or {}).get("mood_log") or [])[-8:]})
         elif path == "/send":
             # 网页打字聊天（2026-08-23）：文本进输入队列 → 她照常回应（同照片路径）
             text = qs.get("text", [""])[0][:200].strip()
@@ -950,7 +1114,12 @@ def main():
     # 本地识别/合成预热（2026-08-22）：后台加载 whisper + Qwen3-TTS 模型（各≈10-20秒），
     # 第一次说话前就绪——不预热的话第一次开口/开口要等加载（降级火山兜底）
     whisper_stt.preload()
+    # 2026-08-23 修复：必须等 whisper 就绪再预热 TTS——两个大模型**并行**加载时
+    # 显存峰值叠加（whisper int8 ~1.5G + Qwen bf16 加载峰值 4.5G+ → 逼近 8G 上限）
+    # 实测 TTS 加载卡死 2.5 分钟无结果，她永远听不到克隆音色。串行后 6~9 秒就绪。
+    whisper_stt.wait_ready()  # 失败降级也不阻塞启动（失败原因已打印）
     tts_local.preload()
+    vad.preload()  # 2026-08-23 批2：Silero VAD（打断检测），~2MB onnx 秒级
     print("=" * 40)
 
     # 读日记本：她记得之前的一切（防失忆！）
@@ -989,11 +1158,40 @@ def main():
     # B.2 启动时若正好落在节奏窗口（如早上7-9点），她先开口说早安
     window_key, window_name = proactive.get_window_now()
     if window_key and proactive.should_fire_window(window_key):
-        handle_event("节奏", f"现在是{window_name}时间，你主动开口", datetime.now().strftime("%H:%M"))
+        handle_event("节奏", f"现在是{window_name}时间，你主动开口")
         proactive.mark_window_fired(window_key)
 
     # B.2 后台调度器：每秒检查节奏窗口和到期提醒
-    sched = proactive.Scheduler(handle_event)
+    # 睡前回想（2026-08-23 学 Letta Sleep-time Compute）：23 点后她"睡了"，
+    # 把今天聊的整理成记忆（daily + summary）。防重入（tick 每秒一次，
+    # LLM 调用要几秒）。**锁外计算**（2026-08-23 优化）：LLM 调用 5~10 秒
+    # 不能抱着 diary_lock 睡大觉——23 点你还在聊天的话会被卡住。
+    # 方案：锁内取快照 → 锁外算（sleep_time_integrate 原地改快照）→
+    # 提交时重拿锁，把摘要写回真 diary + 重滤消息（整合期间新来的消息
+    # 都是今天的，不受影响——睡前回想只处理"过去的日期"）。异常不外抛
+    _sleep_integrating = False
+
+    def _maybe_sleep_integrate(now=None):
+        nonlocal _sleep_integrating
+        if _sleep_integrating:
+            return
+        _sleep_integrating = True
+        try:
+            import copy as _copy
+            with diary_lock:
+                snapshot = _copy.deepcopy(diary)
+            if context.sleep_time_integrate(snapshot):  # 锁外：LLM 调用在这
+                with diary_lock:
+                    diary["daily"] = snapshot["daily"]
+                    diary["summary"] = snapshot["summary"]
+                    diary["emotion_line"] = snapshot["emotion_line"]
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    diary["messages"] = [m for m in diary["messages"]
+                                         if (m.get("time") or "")[:10] >= today]
+        finally:
+            _sleep_integrating = False
+
+    sched = proactive.Scheduler(handle_event, on_sleep_integrate=_maybe_sleep_integrate)
     sched.start()
 
     # O2 通话模式（v2 P2）：与"按键说话"共用互斥锁（不会同时抢麦克风），
@@ -1020,11 +1218,16 @@ def main():
             break
         user_input = raw_input.strip()
         # 打断：你有话要说 → 她正在说的话立即停，也不再"补充"（真人被打断就是这样）
-        global _interrupted
+        global _interrupted, _interrupted_tail
         if user_input:
             _interrupted = True
             voice.stop_playing()
             mark_user_speak()  # 你接话了 → 她等你说完，不再抢话
+            # A-P1-3：打断瞬间她正说到哪了（按已播时长估算）→ 这轮注入，
+            # 她接话时自然续上（"他打断你时你正说到…"）——只记一句，清空等下次
+            _tail = voice.interrupted_tail()
+            if _tail:
+                _interrupted_tail = _tail
         # 命令只认终端来源（网页🎤说的话不可能是"exit"）
         if src == "terminal":
             if not user_input:
@@ -1085,9 +1288,16 @@ def main():
         # 小脾气：程序检测"他提别的女生/夸别人/哄她"→ 写进"心"（App 是游戏主持人，
         # 触发归程序管，不赌 LLM 自觉；表现（怎么吃醋/怎么嘴硬）才由 LLM 发挥）
         _, temper_event = heart_mod.apply_temper(her_heart, user_input)  # 返回 (heart, event)
+        _just_soothed = False  # 承认钩子：她刚被哄到心软 → 这轮台词要演出"软化中"
         if temper_event:
             kind, reason = temper_event
             print(f"  {'💔' if kind == 'jealous' else '🕊️'}（她{'吃醋了' if kind == 'jealous' else '被你哄好了'}：{reason}）")
+            _just_soothed = (kind.startswith("soothe") and her_heart["mood"].get("primary") == "content")
+        elif her_heart["mood"].get("primary") in ("angry", "jealous"):
+            # 气在慢慢消（2026-08-23 指数半衰期，对照 openfeelz/ALMA）：
+            # 真人聊几轮气自然就消，不用每句都道歉。非哄轮按"距这口气开始（since）"
+            # 指数衰减 V=45+(V0-45)·e^(-Δt/2h)，另加聊天加速器 -6——连续、不过夜
+            heart_mod.passage_soothe(her_heart)
 
         # 看照片（2026-08-23，视觉模型）：他发图片路径 → 她"看"了再回应，
         # 不经过文本大脑（一个调用搞定，单张 ~0.0012 元）
@@ -1128,6 +1338,12 @@ def main():
                 f"【你上次没说完】他打断你时，你还有话没说完：「{'」；「'.join(_unfinished)}」。"
                 "他若问起或话题合适，可以自然接上；他若换了话题，就顺着新话题聊，不用硬接。")})
             _unfinished = []
+        # A-P1-3：他打断你时你正说到一半的那句 → 合并进"没说完"注入（不重复覆盖）
+        if _interrupted_tail:
+            messages.append({"role": "system", "content": (
+                f"【你正说到一半】他打断你时，{_interrupted_tail}"
+                "——他不一定听清了你后面的内容，你可以自然说完，也可以顺着他的话走。")})
+            _interrupted_tail = ""
 
         # O6 工作记忆（v2 P2）：他答应过"待会给你看照片"还没兑现 → 她惦记着（不唠叨）
         _promise_hint = proactive.promise_hint(user_input)
@@ -1152,6 +1368,24 @@ def main():
                 messages.append({"role": "system", "content": (
                     f"【纪念日】{_anniv_lines}。这是你们重要的日子，你可以自然提一嘴"
                     "（比如撒娇问他怎么安排、能不能陪你）；但别每轮都说，提一次就好。")})
+
+        # 承认钩子（UTSUWA strained event 先例，2026-08-23）：程序判定她刚被哄到心软
+        # → 这轮台词顺着状态演——从"气头上"到"心软了"的过渡（嘴上还端着，已经软了）
+        if _just_soothed:
+            messages.append({"role": "system", "content": (
+                "【你刚刚心软了】他刚才哄你，你其实已经没那么气了（气消了但面子还在）。"
+                "这句回应要演出\"软化中\"：语气先软下来，可以嘟囔着给台阶、"
+                "小声说\"我才没原谅你\"，但别继续大爆发，也别完全热情（留一点小傲娇）。")})
+
+        # 台词边界（2026-08-23，C.ai"模型更信最近对话"实证 → 指令贴近输出末尾）：
+        # 她还在生气/吃醋时，禁止台词说"我原谅你了/和好了/没事了"这类完全原谅的话——
+        # 台词是表演、状态才是真相；真原谅由程序检测（她说原谅 → 状态回写，line_regress）
+        if her_heart["mood"].get("primary") in ("angry", "jealous"):
+            messages.append({"role": "system", "content": (
+                "【台词边界】你现在还在生气/吃醋，还没真消气。"
+                "禁止在台词里说\"我原谅你了\"\"和好了\"\"没事了\"这类完全原谅的话——"
+                "你可以嘴硬、试探、给台阶，但不能假装已经彻底和好；"
+                "他继续哄你，你才慢慢软化（你的状态会更新，顺着演就好）。")})
 
         # 连珠炮程序注入（游戏主持人原则）：真人生气是连珠炮，不是一句阴阳怪气。
         # describe 里的"强度高→连珠炮"实测会被长工作台淹没（flash 遵循弱），
@@ -1196,6 +1430,13 @@ def main():
                     if "[reminder:" in reply:
                         break
             inner, spoken, suggestion = parse_reply(reply)
+
+            # 台词回写（MATE"表演连续性但不拥有它"的补刀，2026-08-23）：
+            # 她亲口说"原谅你了/和好啦" → 状态认账沿降级链走一轮（带门闩：
+            # 一段小脾气只认一次、只沿降级链、绝不一步 angry→content）
+            if heart_mod.temper_line_detected(spoken):
+                if heart_mod.line_regress(her_heart, "他说我原谅他了"):
+                    print("  🕊️（她亲口说原谅了 → 状态跟着和好）")
 
             # B.2 提醒机制：她说的话里带 [reminder:5min] 标签 → 存进定时器
             reminders = proactive.parse_reminder_tags(reply)

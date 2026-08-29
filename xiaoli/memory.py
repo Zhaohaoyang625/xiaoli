@@ -89,15 +89,50 @@ _VALENCE_TEXT = {
 }
 
 
+# 矛盾记忆消解（2026-08-23 学 Mem0 issue #4956 教训 + Graphiti invalid_at 概念）：
+# ADD-only 的代价——"我在腾讯上班"→"我跳槽去字节了"两条冲突事实共存，
+# 召回时 LLM 会同时看到矛盾版本（Mem0 用户已用 400+ issue 验证这个坑）。
+# 小李解法（保守版）：新事实带"转变/否定词" + 与旧事实共享核心词（bigram）→
+# 旧事实标 superseded（历史保留可追溯，但召回不再注入 = Graphiti"标失效不删"的轻量版）。
+# 关键实测（2026-08-23）：**bge 余弦对矛盾消解不可靠**——反义句"爱吃香菜"vs
+# "再也不吃香菜"只有 0.65，而并存不冲突的"喜欢奶茶"vs"喜欢果茶"却 0.856——
+# 向量相似度分不清"矛盾"和"相似"，纯向量阈值会漏真矛盾、误伤真并存。
+# 所以用显式转变词 + 字面核心词，不用向量。宁可漏（"跳槽去字节"无共享词不消解）
+# 不可误伤（"两个都喜欢"被消成一个 = 丢信息）。
+_SUPERSEDE_HINTS = ("不", "没", "别", "戒", "改", "换", "现在", "再")
+_SUPERSEDE_SCAN = 20  # 只扫最近 20 条旧事实（同主题新声明只可能最近；全扫存记忆会慢）
+
+
+def _maybe_supersede(facts, content):
+    """新事实是否推翻某条旧事实：带转变/否定词 + 共享核心词（bigram）→ 旧事实标 superseded。
+    返回是否发生过消解。主线程存记忆路径：无转变词直接返回（零开销）"""
+    if not any(w in content for w in _SUPERSEDE_HINTS):
+        return False
+    new_grams = _bigrams(content)
+    recent = sorted(facts,
+                    key=lambda f: f.get("lastRecalled", f.get("createdAt", "")),
+                    reverse=True)[:_SUPERSEDE_SCAN]
+    hit = False
+    for f in recent:
+        if f.get("superseded"):
+            continue
+        if _bigrams(f["content"]) & new_grams:  # 共享核心词 = 同一主题
+            f["superseded"] = True  # 保留历史（可追溯/翻旧账），召回不再注入
+            hit = True
+    return hit
+
+
 def merge_fact(facts, content, importance=5, category="其他", confidence=0.8, valence="neutral"):
     """存一条事实；已存在同内容 → 更新重要度（取更高）和时间戳（复习=加固）。
-    v2 M5：valence 是"记下这条记忆时她的情绪"（躯体标记）——高情绪记忆衰减更慢"""
+    v2 M5：valence 是"记下这条记忆时她的情绪"（躯体标记）——高情绪记忆衰减更慢
+    v2 M9（2026-08-23 矛盾消解）：新声明带转变词且共享核心词推翻旧事实 → 旧事实标 superseded"""
     for f in facts:
         if f["content"] == content:
             f["importance"] = max(f["importance"], importance)
             f["confidence"] = max(f["confidence"], confidence)
             f["lastRecalled"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             return False  # 已存在，不是新记忆
+    _maybe_supersede(facts, content)  # 矛盾消解：新声明推翻旧的（如"再也不吃香菜"）
     facts.append({
         "id": str(uuid.uuid4())[:8],
         "content": content,
@@ -172,12 +207,15 @@ def _fact_vec(fact_content):
     if fact_content in _EMBED_CACHE:
         return _EMBED_CACHE[fact_content]
     try:
-        import embed
+        from xiaoli import embed  # 2026-08-23 修复：包内裸 `import embed` 会 ModuleNotFoundError
+        #   → 被 except 吞掉 → 语义加分从未生效（一直降级 TF-IDF）——同"bge 空目录"假成功教训
         vec = embed.embed(fact_content)
     except Exception:
         vec = None
     if len(_EMBED_CACHE) > 500:
-        _EMBED_CACHE.clear()  # 防无限增长
+        # 2026-08-23 修复：满时淘汰一半最旧的（之前全清 → facts>500 时每轮全量重算 → 每轮慢）
+        for k in list(_EMBED_CACHE)[: len(_EMBED_CACHE) // 2]:
+            del _EMBED_CACHE[k]
     _EMBED_CACHE[fact_content] = vec
     return vec
 
@@ -197,7 +235,7 @@ def _score(fact_content, user_input, idf=None, input_vec=None):
         v = _fact_vec(fact_content)
         if v is not None:
             try:
-                import embed
+                from xiaoli import embed  # 包内必须 from xiaoli import（裸 import 会静默降级）
                 return base + embed.cosine(input_vec, v) * 2.0
             except Exception:
                 pass
@@ -242,12 +280,14 @@ def recall(facts, user_input, top=5, now=None):
     idf = _build_idf(facts)
     input_vec = None
     try:
-        import embed as _embed
+        from xiaoli import embed as _embed  # 包内必须 from xiaoli import（裸 import 会静默降级）
         input_vec = _embed.embed(user_input, is_query=True)
     except Exception:
         input_vec = None
     hits = []
     for f in facts:
+        if f.get("superseded"):
+            continue  # 已被更新的声明推翻（历史保留，不再注入——矛盾消解）
         rel = _score(f["content"], user_input, idf=idf, input_vec=input_vec)
         if rel >= 1:
             hits.append((f, rel))

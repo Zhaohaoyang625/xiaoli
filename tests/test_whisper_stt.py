@@ -94,7 +94,8 @@ class TestTranscribe(unittest.TestCase):
 
     @mock.patch("xiaoli.whisper_stt._load", return_value=True)
     def test_normal_path(self, m_load):
-        """真返回文本（含句内换行拼接），语言锁中文"""
+        """真返回文本（含句内换行拼接），语言锁中文，beam=5（2026-08-23 用户
+        实测识别有差距：beam=1 贪心快但同音字易错，GPU 上 beam=5 几乎无感）"""
         fake = mock.Mock()
         fake.transcribe.return_value = (iter([self._seg("你"), self._seg("好")]), mock.Mock())
         whisper_stt._model = fake
@@ -102,7 +103,7 @@ class TestTranscribe(unittest.TestCase):
         self.assertEqual(text, "你好")
         kwargs = fake.transcribe.call_args.kwargs
         self.assertEqual(kwargs.get("language"), "zh")
-        self.assertEqual(kwargs.get("beam_size"), 1)
+        self.assertEqual(kwargs.get("beam_size"), 5)
         self.assertIs(kwargs.get("vad_filter"), True)
 
     @mock.patch("xiaoli.whisper_stt._load", return_value=True)
@@ -133,6 +134,45 @@ class TestAddNvidiaDlls(unittest.TestCase):
         self.assertIn("nvidia/cublas/bin", os.environ["PATH"])
         self.assertIn("nvidia/cudnn/bin", os.environ["PATH"])
         self.assertEqual(m_add.call_count, 2)
+
+
+class TestWaitReady(unittest.TestCase):
+    """串行化预热（2026-08-23 修复：whisper 未就绪时 TTS 并行加载显存峰值叠加会卡死）"""
+
+    def tearDown(self):
+        whisper_stt._preload_thread = None
+        whisper_stt._model = None
+
+    def test_no_preload_returns_true(self):
+        """STT_LOCAL=False 没启动预热线程 → 直接放行（无显存竞争）"""
+        whisper_stt._preload_thread = None
+        self.assertTrue(whisper_stt.wait_ready())
+
+    def test_loaded_returns_true(self):
+        """模型已就绪 → True"""
+        whisper_stt._preload_thread = mock.Mock(is_alive=mock.Mock(return_value=True))
+        whisper_stt._model = object()
+        self.assertTrue(whisper_stt.wait_ready())
+
+    def test_failed_thread_returns_false(self):
+        """加载线程已结束且没成功（失败）→ False（不阻塞启动，原因已打印）"""
+        thread = mock.Mock(is_alive=mock.Mock(return_value=False))
+        whisper_stt._preload_thread = thread
+        whisper_stt._model = None
+        self.assertFalse(whisper_stt.wait_ready())
+
+    def test_waits_until_loaded(self):
+        """加载中 → 轮询等就绪 → True（模拟 1 秒后加载完成）"""
+        whisper_stt._preload_thread = mock.Mock(is_alive=mock.Mock(return_value=True))
+        whisper_stt._model = None
+
+        def _fake_loaded(*_a):
+            whisper_stt._model = object()  # 第一次 sleep 后"加载完成"
+            return whisper_stt._model
+
+        with mock.patch.object(whisper_stt.time, "sleep",
+                               side_effect=_fake_loaded):
+            self.assertTrue(whisper_stt.wait_ready(timeout=5))
 
 
 if __name__ == "__main__":

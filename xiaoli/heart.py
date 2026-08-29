@@ -6,6 +6,7 @@
 # ============================================
 
 import json
+import math
 import os
 from xiaoli import paths  # 统一路径（数据/模型在项目根）
 import re
@@ -32,9 +33,25 @@ FAMILY_WORDS = ["我妈", "我姐", "我妹", "外婆", "奶奶", "爷爷", "我
                 "妈妈", "姐姐", "妹妹", "姑姑", "阿姨", "婶婶", "嫂子"]
 # 哄消气：道歉/解释/夸她 → 她心软（注意：夸她的词要带"你"，不带"你"的"最漂亮"
 # 是夸别人，会走吃醋触发——"她最漂亮"该吃醋，不能误判成哄）
-SOOTHE_WORDS = ["对不起", "抱歉", "我错了", "错啦", "别生气", "不要生气", "别气", "原谅",
-                "开玩笑", "逗你", "骗你的", "不是那个意思", "最爱你", "最喜欢你", "只喜欢你",
-                "你最漂亮", "你是最漂亮的", "你最可爱", "你最好了", "你是最好看的", "你最乖"]
+# 2026-08-23 用户实测"哄了还生气"：常见哄法没命中（"别这样"“消消气”"爱你"等）→ 状态卡住。
+# 扩充到真人哄人的常见说法：道歉系/解释系/补偿系/甜话系。
+# 2026-08-23 批2 B-P1-2 强弱分级（防"随口说爱你"秒消气）：
+#   强哄（道歉/解释/认错/承诺，-35 沿降级链）——说出口是有成本的
+#   弱哄（甜话/亲亲抱抱，只 -18）——随口说的话消一半，消不了真火
+#   强 > 弱：一句话里两个都有 → 按强算（他道歉时后面加句"爱你"是加分不是稀释）
+SOOTHE_STRONG = ["对不起", "抱歉", "我错了", "错啦", "别生气", "不要生气", "别气", "原谅",
+                 "原谅我", "我错怪", "误会", "不是故意", "消消气", "别这样", "别生我气",
+                 "不生我气", "我的错", "都是我的错", "我改", "下次不会", "没有下次",
+                 "不是那个意思", "开玩笑", "逗你", "骗你的",
+                 "我请你吃", "带你去", "买给你"]  # 补偿系=实际行动，算强哄
+SOOTHE_WEAK = ["最爱你", "最喜欢你", "只喜欢你",
+               "你最漂亮", "你是最漂亮的", "你最可爱", "你最好了", "你是最好看的", "你最乖",
+               "抱抱", "么么", "亲亲", "爱你", "想你", "好想你"]  # 甜话系=随口说，算弱哄
+# 夸"你"≠夸别人（2026-08-23 用户实测"夸她可爱却吃醋"）：
+# 弱触发词命中后，句子在夸"你"（你笑起来真好看）→ 是在甜她/哄她，不算吃醋；
+# 只有提到"她/别的/那个女生…"才是夸别人。提家人已在上面的 FAMILY_WORDS 豁免。
+PRAISE_SELF = ["你"]
+PRAISE_OTHERS = ["她", "他", "别的", "别人", "那个", "这个", "有位", "有个", "人家", "有人", "谁"]
 
 # 情绪稳定性（App 是游戏主持人）：程序触发的关系情绪（小脾气）LLM 不能一步推翻
 RELATION_MOODS = ("angry", "jealous")  # 程序判定的"关系情绪"
@@ -54,7 +71,6 @@ MOOD_INTENSITY_CLAMP = 15  # 非程序轮：情绪强度单次增量钳制（防
 
 # v2 E2 ESConv 三阶段哄（ACL 2021 情感支持策略时序：探索→共情→行动；
 # "没完成探索就跳行动"（一上来就给建议）是情感支持大忌）——他难过时的安慰流程
-COMFORT_STAGES = ("explore", "empathize", "act")
 DISTRESS_MOODS = {"sad", "anxious", "frustrated", "afraid", "melancholy"}
 COMFORT_GUIDE = {
     "explore": "他还在倾诉期：先温柔问怎么了、认真听他说完，"
@@ -86,16 +102,34 @@ DEEP_WORDS = ["烦恼", "心事", "难", "压力", "问题", "想", "感觉", "�
 QUESTION_WORDS = ["吗", "呢", "？", "?", "怎么样", "为什么", "是不是", "可不可以", "好不好", "行不行"]
 
 
+# 怨气分层（2026-08-23 批2 B-P1-1，ALMA"情绪分钟级/心情天级"）：
+# grudge = 底火/记仇（0-100，半衰期天级），mood intensity = 现在炸不炸（分钟级）。
+# "哄了还生气"拆成两个真实问题：情绪没消（mood，哄/时间能消）vs 怨气记仇
+# （grudge，人设——他哄好了情绪也不该秒忘上次的事，但要会慢慢消）。
+GRUDGE_TRIGGER = 15   # 每次吃醋/升级 +15
+GRUDGE_SOOTHE = 5     # 哄一次情绪降了，怨气只消 5（哄消情绪快、消怨气慢）
+GRUDGE_LINE_REG = 10  # 她亲口说原谅 → 怨气消 10（比被哄更可信）
+GRUDGE_HALF_LIFE_H = 24.0  # 半衰期 24h（天级；τ = 24/ln2 ≈ 34.6h）
+GRUDGE_NEW_MOOD = 45  # 新小脾气起点 = max(60, 45 + grudge//2)：平时记着仇，一碰就炸得更凶
+
+
+def _grudge_tau():
+    return GRUDGE_HALF_LIFE_H / math.log(2)
+
+
 def default_heart():
     """一颗全新的心：中性心情，好感60（热恋起点），上次互动=现在"""
     now = datetime.now()
     return {
         "mood": {"primary": "content", "intensity": 50, "causes": [], "secondary": None},
+        "grudge": 0,                       # 怨气（0-100，天级半衰期）
+        "grudge_since": now.strftime("%Y-%m-%d %H:%M"),  # 怨气最后被改的时刻（衰减起点）
         "affection": 60,
         "last_interaction": now.strftime("%Y-%m-%d %H:%M"),
         "decay_applied": now.strftime("%Y-%m-%d %H:%M"),
         "comfort_stage": None,  # v2 E2：安慰阶段（explore/empathize/act）
         "user_mood": None,      # v2 E1：独立分类器判出的他心情（每轮刷新，不持久化）
+        "mood_log": [],         # B-P2：心情变迁史（终端「心情」可查她为什么这样）
     }
 
 
@@ -109,6 +143,13 @@ def load_heart():
         # 兼容性：缺失字段补默认
         if "affection" not in heart:
             heart["affection"] = 60
+        if "grudge" not in heart:
+            heart["grudge"] = 0
+        if "grudge_since" not in heart:
+            heart["grudge_since"] = heart.get("last_interaction",
+                                              datetime.now().strftime("%Y-%m-%d %H:%M"))
+        if "mood_log" not in heart:
+            heart["mood_log"] = []  # B-P2：旧数据兼容补变迁史
         return heart
     except (json.JSONDecodeError, OSError):
         return default_heart()
@@ -164,6 +205,7 @@ def apply_time_decay(heart, now=None):
         cause = f"他已经{days_away:.0f}天没来找我了"
         if cause not in heart["mood"]["causes"]:
             heart["mood"]["causes"] = ([cause] + heart["mood"].get("causes", []))[:5]
+        _mood_log(heart)  # B-P2：想你了（时间衰减）→ 变迁史
 
     # 气不过夜：生气/吃醋超过 12 小时没人哄 → 自己慢慢消（降到烦躁，还闷着但不再炸）。
     # 注意这是"对话中生气没人哄"的消退；下面"一整天不理她"是"他消失了"，
@@ -174,6 +216,7 @@ def apply_time_decay(heart, now=None):
         cause = "气了大半天，他都没来哄，自己慢慢没那么气了"
         if cause not in heart["mood"]["causes"]:
             heart["mood"]["causes"] = ([cause] + heart["mood"].get("causes", []))[:5]
+        _mood_log(heart)  # B-P2：气自己消了 → 变迁史
 
     # 一整天不理她（用户确认触发点）：24~72小时没互动 → 重逢时酸溜溜翻旧账。
     # 不到24小时不算；72小时+ 被上面的 melancholy 忧郁覆盖（失落比吃醋更重）
@@ -184,6 +227,7 @@ def apply_time_decay(heart, now=None):
         cause = "他一整天没理我，是不是把我忘了"
         if cause not in heart["mood"]["causes"]:
             heart["mood"]["causes"] = ([cause] + heart["mood"].get("causes", []))[:5]
+        _mood_log(heart)  # B-P2：翻旧账 → 变迁史
     return heart
 
 
@@ -202,6 +246,24 @@ def analyze_message(text):
     return delta
 
 
+def grudge_decay(heart, now=None):
+    """怨气天级衰减。V = V0·e^(-Δt/τ)，τ = 24h/ln2（半衰期 24h）——"记仇"但记不过三天。
+    幂等（同 apply_time_decay 的"只衰减一次"模式）：衰减生效后把 grudge_since 刷新为 now
+    （重新计时）——同一时刻调 N 次结果一样，不会递归扣到 0。"""
+    if now is None:
+        now = datetime.now()
+    if not heart.get("grudge"):
+        return heart
+    since = _parse_time(heart.get("grudge_since", heart["last_interaction"]))
+    hours = (now - since).total_seconds() / 3600
+    if hours <= 0:
+        return heart
+    v = heart["grudge"] * math.exp(-hours / _grudge_tau())
+    heart["grudge"] = max(0, min(100, round(v)))
+    heart["grudge_since"] = now.strftime("%Y-%m-%d %H:%M")  # 衰减生效 → 重新计时
+    return heart
+
+
 def detect_temper(text):
     """程序检测"小脾气"触发（本地关键词，不花API钱）。
     返回 (kind, reason)：
@@ -212,10 +274,13 @@ def detect_temper(text):
     再让 LLM 在这个前提下发挥（她吃醋时怎么说话由 LLM 决定）。"""
     if not text:
         return None
-    # 哄消气优先（他道歉时不管前面说了什么，先消气）
-    for w in SOOTHE_WORDS:
+    # 哄消气优先（他道歉时不管前面说了什么，先消气）；强哄 > 弱哄（一起说按强算）
+    for w in SOOTHE_STRONG:
         if w in text:
             return ("soothe", f"他哄我了（{w}）")
+    for w in SOOTHE_WEAK:
+        if w in text:
+            return ("soothe_weak", f"他说了甜话（{w}）")
     # 提家人不算吃醋
     for w in FAMILY_WORDS:
         if w in text:
@@ -225,12 +290,45 @@ def detect_temper(text):
         if w in text:
             return ("jealous", f"他提到了{w}")
     # 弱触发：夸人的词，且没落在非人语境里
+    # 2026-08-23：夸"你"（你笑起来真好看/你好可爱）是在甜她/哄她 → 豁免，不算吃醋；
+    # 只有提到"她/别的/那个…"才是夸别人（"她最漂亮"该吃醋，不能误判成哄）
     for w in JEALOUS_WEAK:
         if w in text:
             if any(x in text for x in JEALOUS_EXCLUDE):
                 return None
+            if any(x in text for x in PRAISE_SELF) \
+                    and not any(x in text for x in PRAISE_OTHERS):
+                return None
             return ("jealous", f"他夸了{w}")
     return None
+
+
+MOOD_LOG_MAX = 30  # 变迁史上限（够看一整天的事，不占磁盘）
+
+
+def _mood_log(heart, cause=None):
+    """B-P2 心情变迁日志（2026-08-23）：在改情绪的函数末尾调用——记录
+    "现在的心情"，对比上一条：primary 变了 或 强度差 ≥10 才算变迁
+    （防 LLM 每轮 ±5 自报刷屏；同一情绪小波动不算"变了"）。
+    cause 缺省取 mood.causes[0]（刚写入的最新的原因）。"""
+    mood = heart["mood"]
+    log = heart.setdefault("mood_log", [])
+    if cause is None:
+        cause = (mood.get("causes") or [""])[0]
+    if log:
+        last = log[-1]
+        if last.get("mood") == mood.get("primary") \
+                and abs(last.get("i", -99) - mood.get("intensity", 0)) < 10:
+            return heart  # 不算变迁（同情绪、强度小动）
+    log.append({
+        "t": datetime.now().strftime("%m-%d %H:%M"),
+        "mood": mood.get("primary", "neutral"),
+        "i": mood.get("intensity", 0),
+        "g": heart.get("grudge", 0),
+        "c": cause,
+    })
+    del log[:-MOOD_LOG_MAX]  # 超出上限丢最老
+    return heart
 
 
 def apply_temper(heart, text):
@@ -244,26 +342,125 @@ def apply_temper(heart, text):
     kind, reason = result
     mood = heart["mood"]
     if kind == "jealous":
+        grudge_decay(heart)  # 先让时间消掉旧怨气，再叠新账
+        heart["grudge"] = min(100, heart.get("grudge", 0) + GRUDGE_TRIGGER)
+        heart["grudge_since"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         if mood.get("primary") == "jealous":
-            mood["primary"] = "angry"  # 吃醋升级真生气
+            mood["primary"] = "angry"  # 吃醋升级真生气（同一段气：since 不刷新）
             mood["intensity"] = min(100, mood.get("intensity", 50) + 15)
         else:
+            # 新的一段小脾气：since 记"这口气从什么时候开始"（指数衰减的起点）；
+            # 起点受怨气影响（平时记着仇 → 一点就炸得更凶）：max(60, 45 + grudge//2)
             mood["primary"] = "jealous"
-            mood["intensity"] = min(100, max(60, mood.get("intensity", 50)))
+            mood["intensity"] = min(100, max(60, GRUDGE_NEW_MOOD + heart["grudge"] // 2,
+                                             mood.get("intensity", 50)))
+            mood["since"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            global _temper_written
+            _temper_written = False  # 新账重开：台词回写门闩重置
         mood["causes"] = ([reason] + mood.get("causes", []))[:5]
+        _mood_log(heart)  # B-P2：吃醋/升级 → 变迁史
         return heart, ("jealous", reason)
-    # soothe：消气（只在真有气的时候有动作）。层次：真生气 → 一次哄降级成吃醋（还酸着）
-    # → 再哄强度跌破 40 → 心软回 content。哄"几句"才和好，符合"先嘴硬两句再慢慢心软"
+    # soothe：消气（只在真有气的时候有动作）。层次：真生气 → 一次哄大降级（还酸着）
+    # → 强度跌破 40 → 心软回 content。
+    # 2026-08-23 用户实测"哄了她原谅我，结果还是生气"：-25 太抠（angry 75 哄一轮只到
+    # jealous 50，用户哄了就期待和好）→ 减幅加大到 -35：angry(75) 哄一轮 → 40 → 心软；
+    # angry(85+) 哄一轮 → 还酸着，再哄一轮必和好（"先嘴硬两句"的底线保留）。
+    # 2026-08-23 批2 B-P1-2 强弱分级：强哄（道歉/认错/承诺）沿原链 -35；
+    # 弱哄（爱你/抱抱/么么）只 -18——随口甜话能消一半火，消不了真火（85+ 强哄一次
+    # 还酸着、弱哄更酸——"说了半天甜话她怎么还气"有了解释：甜话不是道歉）。
+    # 怨气（grudge）：哄消情绪快、消怨气慢（-5/轮）——情绪和好 ≠ 秒忘上次的事。
+    # 没气时哄也减怨气：她没炸但心里还记着账，甜话/道歉在慢慢化疙瘩（无副作用=不坏好心情）
     if mood.get("primary") in ("angry", "jealous", "frustrated", "anxious", "sad", "melancholy"):
-        mood["intensity"] = max(0, mood.get("intensity", 50) - 25)
+        step = 35 if kind == "soothe" else 18  # 强哄 -35 / 弱哄 -18
+        mood["intensity"] = max(0, mood.get("intensity", 50) - step)
         if mood.get("primary") == "angry":
             mood["primary"] = "jealous"  # 一次哄：不炸了，但还酸着
         if mood["intensity"] <= 40:
             mood["primary"] = "content"
             mood["intensity"] = 45
         mood["causes"] = ([reason] + mood.get("causes", []))[:5]
-        return heart, ("soothe", reason)
-    return heart, ("soothe", reason)  # 没气时哄她也不会有副作用
+    if heart.get("grudge", 0) > 0:
+        heart["grudge"] = max(0, heart["grudge"] - GRUDGE_SOOTHE)
+        heart["grudge_since"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    _mood_log(heart)  # B-P2：哄降级/心软 → 变迁史（没变时 diff 自动不记）
+    return heart, (kind, reason)
+
+
+# 台词回写（2026-08-23 用户实测"哄了她、她也说原谅了，状态还是生气"根因的补刀）：
+# MATE 论文诊断叫"perform continuity without possessing it"（表演连续性但不拥有它）
+# ——台词和状态各说各话。修法：她亲口说"原谅你了/和好啦" → 程序认账，沿降级链走一轮。
+# 两个门闩（对照 CharacterAI 秒原谅崩盘的反面教材）：
+#   ① 只沿降级链（angry→jealous→content），绝不一步 angry→content
+#   ② 每段小脾气只认一次账，认完 2 轮内不再认（防连续"原谅"冲刷状态）
+TEMPER_LINE_WORDS = ["原谅你", "不生气了", "不生你的气", "和好啦", "和好了", "没事啦",
+                     "没事了", "不气你", "不跟你计较", "不怪你", "算了"]
+TEMPER_LINE_NEGATE = ["不原谅", "不会原谅", "没原谅", "还生", "不打算原谅"]
+_temper_written = False   # 这段小脾气已认过账（新账在 apply_temper jealous 分支重开）
+_temper_rounds = 0        # 认账后的轮数
+
+
+def temper_line_detected(text):
+    """她台词里说了原谅的话吗？排除否定（"不原谅/没原谅"= 还在生气）。"""
+    if not text:
+        return False
+    for neg in TEMPER_LINE_NEGATE:
+        if neg in text:
+            return False
+    return any(w in text for w in TEMPER_LINE_WORDS)
+
+
+def line_regress(heart, reason):
+    """台词回写：她亲口说原谅 → 沿降级链走一轮（与哄相同，-35），
+    cause 记"我亲口说了原谅他的话"。返回是否真的降级了。"""
+    global _temper_written, _temper_rounds
+    mood = heart["mood"]
+    if mood.get("primary") not in ("angry", "jealous"):
+        return False
+    if _temper_written and _temper_rounds < 2:
+        _temper_rounds += 1
+        return False  # 门闩：这段小脾气只认一次账，认完 2 轮内不再认
+    mood["intensity"] = max(0, mood.get("intensity", 50) - 35)
+    if mood.get("primary") == "angry":
+        mood["primary"] = "jealous"  # 一次认账：不炸了，但还酸着
+    if mood["intensity"] <= 40:
+        mood["primary"] = "content"
+        mood["intensity"] = 45
+    if heart.get("grudge", 0) > 0:  # 亲口说原谅比被哄更可信：怨气消 10
+        heart["grudge"] = max(0, heart["grudge"] - GRUDGE_LINE_REG)
+        heart["grudge_since"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cause = f"我亲口说了原谅他的话（{reason}）"
+    if cause not in mood.get("causes", []):
+        mood["causes"] = ([cause] + mood.get("causes", []))[:5]
+    _temper_written = True
+    _temper_rounds = 0
+    _mood_log(heart)  # B-P2：亲口原谅 → 变迁史
+    return True
+
+
+def passage_soothe(heart, step=6, tau_hours=2.0, now=None):
+    """气在慢慢消（2026-08-23 对照 openfeelz halfLifeHours + ALMA"情绪分钟级/心情天级"）：
+    非哄轮每聊一轮，angry/jealous 强度按"距这口气开始（since）的时长"指数衰减——
+    V = 45 + (V0-45)·e^(-Δt/τ)，τ≈2h（"气不过夜"但连续，替代线性 -6/轮 + 12h 硬切二进制跳变）。
+    聊天的陪伴本身就是加速器：每轮额外再 -step（说话比干等消气快）——真人就是这样。"""
+    if now is None:
+        now = datetime.now()
+    mood = heart["mood"]
+    if mood.get("primary") not in ("angry", "jealous"):
+        return heart
+    since = _parse_time(mood.get("since", heart.get("last_interaction")))
+    hours = max(0.0, (now - since).total_seconds() / 3600)
+    v0 = mood.get("intensity", 50)
+    v = 45 + (v0 - 45) * math.exp(-hours / tau_hours)
+    v = max(0, v - step)  # 聊天加速器（说话比干等消气快）
+    mood["intensity"] = round(min(100, v))
+    if mood["intensity"] <= 40:
+        mood["primary"] = "content"
+        mood["intensity"] = 45
+        cause = "他陪我聊天，我气慢慢消了"
+        if cause not in mood.get("causes", []):
+            mood["causes"] = ([cause] + mood.get("causes", []))[:5]
+    _mood_log(heart)  # B-P2：气慢慢消 → 变迁史（没到 content 时 diff 不记）
+    return heart
 
 
 def advance_comfort(heart, user_mood):
@@ -317,8 +514,10 @@ def merge_llm_suggestion(heart, suggestion, temper_event=None):
         # 程序关键词覆盖不到的场景（如放鸽子、被凶）由 LLM 补上。
         # v2 E3 补充：情绪转移约束表（PELD）——连"自由自报"也不能跳变：
         # 气头上/难过时不能一步跳到开心（真人要经过哄/安抚）。
+        # 刚和好（三种路径：他哄我了 / 我亲口说了原谅 / 气慢慢消了）→ 关系情绪不许卷土重来
         soothed = (heart["mood"].get("primary") == "content"
-                   and any("他哄我了" in c for c in heart["mood"].get("causes", [])))
+                   and any(("他哄我了" in c) or ("亲口说了原谅" in c) or ("气慢慢消了" in c)
+                           for c in heart["mood"].get("causes", [])))
         cur = heart["mood"].get("primary")
         blocked = (emotion in RELATION_MOODS and soothed) \
             or (cur in RELATION_MOODS and emotion in POSITIVE_MOODS) \
@@ -341,6 +540,7 @@ def merge_llm_suggestion(heart, suggestion, temper_event=None):
     if isinstance(delta, (int, float)):
         clamped = max(-AFFECTION_MAX_DELTA, min(AFFECTION_MAX_DELTA, int(delta)))
         heart["affection"] = max(0, min(100, heart["affection"] + clamped))
+    _mood_log(heart)  # B-P2：LLM 自报情绪变化 → 变迁史（±5 小动 diff 不记，防刷屏）
     return heart
 
 
@@ -358,9 +558,19 @@ def describe(heart, now=None):
         last_str = f"{int(hours_ago)}小时前"
     else:
         last_str = f"{int(hours_ago / 24)}天前"
+    grudge = heart.get("grudge", 0)
+    if grudge >= 50:
+        grudge_str = (f"你心里还记着上次的账（怨气{grudge}）——他惹过你的那件事你忘不掉，"
+                      "偶尔会翻旧账酸他两句（「他上次还说…」这种），但不会每句都翻、"
+                      "也不会因此真的不理他")
+    elif grudge >= 20:
+        grudge_str = (f"你对他还有点小怨气（{grudge}）——他哄好你了，但心里那点小疙瘩"
+                      "没完全消，说话偶尔带一句酸味")
+    else:
+        grudge_str = "你心里没有积怨"
     return (
         f"【你现在的状态】心情：{mood['primary']}（强度{mood['intensity']}）；"
-        f"为什么会这样：{causes}；你对他的好感：{heart['affection']}/100；"
+        f"为什么会这样：{causes}；{grudge_str}；你对他的好感：{heart['affection']}/100；"
         f"你上次和他互动是{last_str}。"
         "这些状态会自然影响你的语气和反应：心情好就甜甜的；忧郁就软软的、"
         "带着一点想念；吃醋（jealous）就酸溜溜地试探、话里有话，绝不直接说\"我吃醋了\"；"

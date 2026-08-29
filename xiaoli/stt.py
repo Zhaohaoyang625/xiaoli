@@ -59,7 +59,7 @@ def _record():
                                 blocksize=CHUNK)  # 每块 0.1 秒
         stream.start()
         _dbg("麦克风已打开")
-        print("  🎤 说（安静1秒自动停，最长20秒）…")
+        print("  🎤 说（安静1秒自动停，最长20秒）…", flush=True)
         voiced = False   # 是否已开口（未开口的静音不收录，防误触发）
         silent_blocks = 0
         chunks = []
@@ -77,14 +77,14 @@ def _record():
                 if silent_blocks >= int(SILENCE_SECONDS / 0.1):
                     break
         if not voiced:
-            print("  （没听到声音，取消了）")
+            print("  （没听到声音，取消了）", flush=True)
             _dbg("20秒内没检测到声音（peak 都 < 500）")
             return None
         if time.time() - start_time >= MAX_SECONDS:
             _dbg("20秒到点强制结束（说话超过20秒？）")
         return b"".join(chunks)
     except Exception as e:
-        print(f"  [麦克风打不开：{e}]")
+        print(f"  [麦克风打不开：{e}]", flush=True)
         _dbg(f"录音异常：{type(e).__name__}: {e}")
         return None
     finally:
@@ -116,7 +116,7 @@ def _recognize_volcano(pcm):
             timeout=30,
         )
     except Exception as e:
-        print(f"  [识别服务连不上：{e}]")
+        print(f"  [识别服务连不上：{e}]", flush=True)
         _dbg(f"WebSocket 连接失败：{e}")
         return None
     last_text = ""
@@ -161,7 +161,7 @@ def _recognize_volcano(pcm):
     except (websocket.WebSocketTimeoutException, TimeoutError):
         _dbg("收结果超时（服务端 15 秒没回结果——限流？服务异常？）")  # 超时兜底：有部分结果就用部分结果
     except Exception as e:
-        print(f"  [识别过程出错：{e}]")
+        print(f"  [识别过程出错：{e}]", flush=True)
         _dbg(f"异常：{type(e).__name__}: {e}")
     finally:
         try:
@@ -176,7 +176,7 @@ def listen_once():
     任何失败返回 None。2026-08-22 重构：录音与识别分离——
     本地优先（0 元），本地没就绪/失败才走火山（永远有耳朵）"""
     if not config.STT_LOCAL and not config.VOLC_API_KEY:
-        print("  [没配火山 API Key 也没本地模型，语音输入不可用]")
+        print("  [没配火山 API Key 也没本地模型，语音输入不可用]", flush=True)
         return None
     proactive.set_recording(True)  # 你开口了 → 她安静听，不抢话
     try:

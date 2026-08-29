@@ -34,3 +34,6 @@ dist/
 Thumbs.db
 .claude/
 backups/
+
+# 试听音频（可再生成，同 tts_compare 原则）
+docs/research/tts-demo/

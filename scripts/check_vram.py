@@ -3,7 +3,6 @@
 # 模拟 chat.py 真实运行时序：先预热 whisper → 再预热 TTS → 合成一句
 # ============================================
 
-import gc
 import os
 import sys
 import time

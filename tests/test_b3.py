@@ -97,6 +97,15 @@ class TestRecall(unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["content"], "他喜欢喝奶茶")
 
+    def test_recall_skips_superseded(self):
+        """已被新声明推翻的旧事实不再召回（2026-08-23 矛盾消解）"""
+        old = self._mk("他爱吃香菜")
+        old["superseded"] = True  # 被新声明推翻的历史版本
+        facts = [old, self._mk("他再也不吃香菜了")]
+        hits = memory.recall(facts, "香菜")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["content"], "他再也不吃香菜了")
+
     def test_recall_unrelated(self):
         facts = [self._mk("他喜欢喝奶茶")]
         hits = memory.recall(facts, "今天工作好累啊")
@@ -112,6 +121,53 @@ class TestRecall(unittest.TestCase):
         hits = memory.recall(facts, "水果 0 1 2 3 4 5 6 7 8 9")
         self.assertLessEqual(len(hits), 5)
 
+
+class TestSupersede(unittest.TestCase):
+    """矛盾记忆消解（2026-08-23 学 Mem0 issue #4956 + Graphiti invalid_at）：
+    新事实带转变/否定词且共享核心词（bigram）→ 旧事实标 superseded（保留历史，召回不再注入）。
+    实测放弃 bge 向量：反义句余弦只有 0.65、"喜欢奶茶vs喜欢果茶"（并存）却 0.856——向量分不清矛盾。
+    宁可漏（没转变词并存）不可误伤（两个都喜欢被消成一个 = 丢信息）"""
+
+    def _mk(self, content, days_ago=0):
+        created = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M")
+        return {"id": "x", "content": content, "category": "喜好",
+                "importance": 5, "confidence": 0.8,
+                "createdAt": created, "lastRecalled": created}
+
+    def test_cilantro_superseded(self):
+        """"我再也不吃香菜了"（带"不/再"）推翻"他爱吃香菜"（共享"香菜"）"""
+        facts = [self._mk("他爱吃香菜")]
+        memory.merge_fact(facts, "我再也不吃香菜了")
+        self.assertTrue(facts[0].get("superseded"))
+        self.assertEqual(len(facts), 2)  # 新事实也存了
+        self.assertEqual(facts[1]["content"], "我再也不吃香菜了")
+
+    def test_history_kept_not_deleted(self):
+        """旧事实保留在档案里（只标 superseded，可追溯）"""
+        facts = [self._mk("他爱吃香菜")]
+        memory.merge_fact(facts, "我再也不吃香菜了")
+        self.assertEqual(facts[0]["content"], "他爱吃香菜")  # 没被删
+
+    def test_no_hint_keeps_both(self):
+        """无转变/否定词 → 并存不消解（新信息不是矛盾替换）"""
+        facts = [self._mk("他怕高")]
+        memory.merge_fact(facts, "他要去爬山")  # 无"不/没/改…"词
+        self.assertFalse(facts[0].get("superseded"))
+        self.assertEqual(len(facts), 2)
+
+    def test_low_similarity_no_supersede(self):
+        """带转变词但语义无关 → 不消解（"摔了一跤"不推翻"爱吃香菜"）"""
+        facts = [self._mk("他爱吃香菜")]
+        memory.merge_fact(facts, "我不小心摔了一跤")
+        self.assertFalse(facts[0].get("superseded"))
+
+    def test_scan_only_recent(self):
+        """只扫最近 20 条：很旧的陈述不算"同主题新声明"（全扫存记忆会慢）"""
+        facts = [self._mk("他爱吃香菜", days_ago=24)]  # 最旧的一条
+        for i in range(25):  # 塞 25 条更新的，挤掉香菜位置
+            facts.append(self._mk(f"他记得路过公园{i}", days_ago=23 - i))
+        memory.merge_fact(facts, "我再也不吃香菜了")
+        self.assertFalse(facts[0].get("superseded"))  # 不在扫描窗口，不动
 
 class TestDecay(unittest.TestCase):
     def setUp(self):

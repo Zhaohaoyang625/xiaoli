@@ -14,6 +14,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from xiaoli import sing
 
 
+def _speak_immediate(text, on_done=None, **kw):
+    """模拟 voice.play_speech：立即触发 on_done（真实实现是播完才触发）——
+    否则 _announce 的 _speak_wait 会真等 30 秒超时"""
+    if on_done:
+        on_done()
+
+
 class TestTrigger(unittest.TestCase):
     """maybe_sing 的触发判定（触发词/排除词）"""
 
@@ -104,7 +111,8 @@ class TestAnnounce(unittest.TestCase):
         r = mock.Mock()
         r.choices = [mock.Mock(message=mock.Mock(content="齁～那我唱《晴天》给你听齁～"))]
         with mock.patch("xiaoli.llm.get_client") as MockOpenAI, \
-             mock.patch("xiaoli.sing.voice.play_speech") as m_speak:
+             mock.patch("xiaoli.sing.voice.play_speech",
+                        side_effect=_speak_immediate) as m_speak:
             MockOpenAI.return_value.chat.completions.create.return_value = r
             title, path = sing._announce(songs)
         self.assertEqual(title, "晴天")
@@ -117,10 +125,36 @@ class TestAnnounce(unittest.TestCase):
         songs = [("小幸运", "a.wav"), ("晴天", "b.mp3")]
         with mock.patch("xiaoli.llm.get_client",
                         side_effect=Exception("挂了")), \
-             mock.patch("xiaoli.sing.voice.play_speech"):
+             mock.patch("xiaoli.sing.voice.play_speech",
+                        side_effect=_speak_immediate):
             title, path = sing._announce(songs)
         self.assertEqual(title, "小幸运")
         self.assertEqual(path, "a.wav")
+
+    def test_announce_waits_for_speech_done(self):
+        """竞态修复契约：报歌名必须等播完（传 on_done）才开唱——
+        否则 sd.play 是替换语义，歌名被歌顶掉/歌被歌名顶掉开头"""
+        songs = [("小幸运", "a.wav")]
+        r = mock.Mock()
+        r.choices = [mock.Mock(message=mock.Mock(content="齁～那我唱《小幸运》给你听齁～"))]
+        got_on_done = {}
+
+        def _capture(text, on_done=None, **kw):
+            got_on_done["on_done"] = on_done
+            on_done()  # 立即播完
+
+        with mock.patch("xiaoli.llm.get_client") as MockOpenAI, \
+             mock.patch("xiaoli.sing.voice.play_speech", side_effect=_capture):
+            MockOpenAI.return_value.chat.completions.create.return_value = r
+            sing._announce(songs)
+        self.assertIsNotNone(got_on_done.get("on_done"), "报歌名必须挂 on_done 等待播完")
+
+    def test_speak_wait_timeout_no_hang(self):
+        """on_done 永不触发（播放系统炸了）→ 超时返回不卡死"""
+        with mock.patch("xiaoli.sing.ANNOUNCE_WAIT_TIMEOUT", 0.05), \
+             mock.patch("xiaoli.sing.voice.play_speech") as m_speak:  # 不触发 on_done
+            sing._speak_wait("齁～那我唱《晴天》给你听齁～")
+        m_speak.assert_called_once()
 
     def test_llm_bad_name_fallback_first(self):
         """LLM 报的名字匹配不到歌 → 用第一首"""
@@ -128,7 +162,8 @@ class TestAnnounce(unittest.TestCase):
         r = mock.Mock()
         r.choices = [mock.Mock(message=mock.Mock(content="齁～那我唱《不存在》齁"))]
         with mock.patch("xiaoli.llm.get_client") as MockOpenAI, \
-             mock.patch("xiaoli.sing.voice.play_speech"):
+             mock.patch("xiaoli.sing.voice.play_speech",
+                        side_effect=_speak_immediate):
             MockOpenAI.return_value.chat.completions.create.return_value = r
             title, path = sing._announce(songs)
         self.assertEqual(title, "小幸运")

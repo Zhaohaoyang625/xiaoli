@@ -7,8 +7,32 @@
 from unittest import mock
 
 import numpy as np
+import pytest
 
 from xiaoli import config, tts_local
+
+
+class TestSoxStub:
+    """sox stub 行为（2026-08-23 回归测试：无差别 __getattr__ 曾让 torch 导入链
+    inspect 拿 __file__ 当函数调 .endswith → 本地克隆整个加载失败降级火山）"""
+
+    def test_stub_has_real_file_attr(self):
+        """__file__ 是真实字符串——inspect.getsourcefile 会对它调 .endswith"""
+        stub = tts_local._make_sox_stub()
+        assert isinstance(stub.__file__, str)
+        assert stub.__file__.endswith("stub>")  # 必须能过 endswith（当年炸在这）
+
+    def test_stub_transformer_raises_clear_error(self):
+        """25Hz 路径真用 sox.Transformer → 清晰 ImportError（崩得明明白白）"""
+        stub = tts_local._make_sox_stub()
+        with pytest.raises(ImportError):
+            stub.Transformer()
+
+    def test_stub_missing_attr_raises_attribute_error(self):
+        """缺失属性 → AttributeError（模仿真实模块语义，不是返回函数）"""
+        stub = tts_local._make_sox_stub()
+        with pytest.raises(AttributeError):
+            stub.anything_else
 
 
 class TestTtsLocal:

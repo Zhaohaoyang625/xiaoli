@@ -16,5 +16,5 @@ DATA_DIR = os.path.join(ROOT, "data")
 # AI 模型：语义向量模型（bge）
 MODELS_DIR = os.path.join(ROOT, "models")
 
-# 文档（评测报告等）
-DOCS_DIR = os.path.join(ROOT, "docs")
+# 网页（XiaoLi.html + Live2D 模型/引擎库）
+WEB_DIR = os.path.join(ROOT, "web")

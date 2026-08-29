@@ -65,6 +65,12 @@ VOLC_VOICE = "zh_female_xiaohe_uranus_bigtts"
 # ============================================
 STT_LOCAL = True
 
+# 通话模式流式识别（2026-08-24）：sherpa-onnx 边说边识别，说完即全文（省 whisper 1~2s 推理等待）。
+# True=流式优先（模型不可用/没听清自动降级 whisper）；False=老路（说完送 whisper）。
+# 实测（80 句）：sherpa 75/80 正确 vs whisper 80/80——短促口语词 whisper 更稳，听错多就改 False。
+# ============================================
+STT_STREAM = True
+
 # ============================================
 # 语音合成路线（2026-08-22 新增）
 # 本地 Qwen3-TTS 声音克隆（1.7B，模型 models/Qwen3-TTS-12Hz-1.7B-Base，ModelScope 下载）：

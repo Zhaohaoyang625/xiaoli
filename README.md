@@ -52,7 +52,7 @@ python -m xiaoli.chat --voice
 ## 测试
 
 ```bash
-python -m pytest tests/ -q           # 300+ 单元测试
+python -m pytest tests/ -q           # 400+ 单元测试（当前 463 项）
 python tests/final_e2e.py            # 全链路实测（真 API，约 1 分钟）
 ```
 

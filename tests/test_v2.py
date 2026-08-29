@@ -515,7 +515,28 @@ class TestO2CallMode(unittest.TestCase):
         finally:
             stt.recognize_pcm = old
 
-    def test_start_stop_state_machine(self):
+    def test_talking_uses_vad_when_ready(self):
+        """2026-08-23 批2：监听分支判定 → VAD 就绪用 VAD（_talking 走 vv.feed）"""
+        from xiaoli import call_mode
+        m = call_mode.CallMode()
+        fake_vad = MagicMock()
+        fake_vad.feed.return_value = True
+        self.assertTrue(m._talking(fake_vad, b"\x00" * 3200))  # 静音也判"在说"= 走的是 VAD
+        fake_vad.feed.return_value = False
+        self.assertFalse(m._talking(fake_vad, b"\x00" * 3200))
+        self.assertEqual(fake_vad.feed.call_count, 2)  # 每块都喂了 VAD，能量未参与
+
+    def test_talking_falls_back_to_energy(self):
+        """2026-08-23 批2：VAD 未就绪（None）→ 回退能量峰值（永远能听）"""
+        import numpy as np
+        from xiaoli import call_mode
+        m = call_mode.CallMode()
+        loud = np.ones(1600, dtype=np.int16) * 3000   # 峰值 3000 > PEAK_VOICE
+        quiet = np.zeros(1600, dtype=np.int16)        # 全静音
+        self.assertTrue(m._talking(None, loud))
+        self.assertFalse(m._talking(None, quiet))
+
+    def test_finish_recognizes_and_forwards(self):
         """start → active；stop → 不 active；重复 start 幂等"""
         import time
         from xiaoli import call_mode
@@ -559,6 +580,93 @@ class TestM3SummarizeParse(unittest.TestCase):
         summary, emotion = context._summarize([], "")
         self.assertIn("只输出了记忆", summary)
         self.assertEqual(emotion, "")
+
+
+class TestSleepTimeIntegrate(unittest.TestCase):
+    """睡前回想（2026-08-23 学 Letta Sleep-time Compute）：
+    夜里把过去的对话整理成 daily + summary，两阶段提交（失败不写任何东西）"""
+
+    @staticmethod
+    def _diary_with_days(*days):
+        """造一个 diary：给定时日各 2 条消息 + 今天(2026-08-23) 2 条（今天不整合）。
+        全部用固定日期——测试断言与之一致，不依赖运行时"今天"（跨午夜跑也不翻车）"""
+        today = "2026-08-23"
+        msgs = []
+        for d in days:
+            for i, role in enumerate(("user", "assistant")):
+                msgs.append({"role": role, "content": f"{d}第{i}条",
+                             "time": f"{d} 10:0{i}"})
+        for i, role in enumerate(("user", "assistant")):
+            msgs.append({"role": role, "content": f"今天第{i}条",
+                         "time": f"{today} 10:0{i}"})
+        return {"summary": "旧记忆。", "daily": {}, "emotion_line": "",
+                "messages": msgs}
+
+    @patch("xiaoli.llm.get_client")
+    def test_integrate_old_days(self, MockOpenAI):
+        """昨天的消息 → 生成 daily 一句话 + 链式合并 summary + 情绪线，
+        昨天的消息从 messages 移除（记忆已入摘要），今天的保留"""
+        MockOpenAI.return_value.chat.completions.create.side_effect = [
+            MagicMock(choices=[MagicMock(message=MagicMock(content="昨天聊了加班"))]),
+            MagicMock(choices=[MagicMock(message=MagicMock(
+                content="【记忆】旧记忆。他最近加班多。\n【情绪线】（8/22 加班累）"))]),
+        ]
+        diary = self._diary_with_days("2026-08-22")
+        changed = context.sleep_time_integrate(diary, datetime(2026, 8, 23, 23, 30))
+        self.assertTrue(changed)
+        self.assertEqual(diary["daily"].get("2026-08-22"), "昨天聊了加班")
+        self.assertIn("加班多", diary["summary"])
+        self.assertEqual(diary["emotion_line"], "（8/22 加班累）")
+        days_left = {(m.get("time") or "")[:10] for m in diary["messages"]}
+        self.assertEqual(days_left, {"2026-08-23"}, "旧消息压缩掉，今天保留")
+
+    @patch("xiaoli.llm.get_client")
+    def test_idempotent_no_llm(self, MockOpenAI):
+        """整合过的日子跳过 → 第二次调用不碰 LLM、不改任何东西"""
+        MockOpenAI.return_value.chat.completions.create.side_effect = [
+            MagicMock(choices=[MagicMock(message=MagicMock(content="昨天聊了加班"))]),
+            MagicMock(choices=[MagicMock(message=MagicMock(
+                content="【记忆】旧记忆。他最近加班多。\n【情绪线】（8/22 加班累）"))]),
+        ]
+        diary = self._diary_with_days("2026-08-22")
+        context.sleep_time_integrate(diary, datetime(2026, 8, 23, 23, 30))
+        calls = MockOpenAI.return_value.chat.completions.create.call_count
+        changed = context.sleep_time_integrate(diary, datetime(2026, 8, 23, 23, 31))
+        self.assertFalse(changed)
+        self.assertEqual(MockOpenAI.return_value.chat.completions.create.call_count, calls,
+                         "没有待整合的日子 → 不该再调 LLM")
+
+    @patch("xiaoli.llm.get_client")
+    def test_failure_keeps_everything(self, MockOpenAI):
+        """LLM 失败 → 什么都不提交（daily 不写、消息不删）→ 明天再试"""
+        MockOpenAI.return_value.chat.completions.create.side_effect = RuntimeError("API 挂了")
+        diary = self._diary_with_days("2026-08-22")
+        changed = context.sleep_time_integrate(diary, datetime(2026, 8, 23, 23, 30))
+        self.assertFalse(changed)
+        self.assertNotIn("2026-08-22", diary["daily"])
+        self.assertEqual(len(diary["messages"]), 4, "失败 → 消息一条不动（昨天2条+今天2条）")
+        self.assertEqual(diary["summary"], "旧记忆。")
+
+    @patch("xiaoli.llm.get_client")
+    def test_seven_day_cap(self, MockOpenAI):
+        """daily 最多留最近 7 天（与压缩一致）"""
+        MockOpenAI.return_value.chat.completions.create.side_effect = [
+            MagicMock(choices=[MagicMock(message=MagicMock(content="旧的一天"))]),
+            MagicMock(choices=[MagicMock(message=MagicMock(
+                content="【记忆】旧记忆。\n【情绪线】（无）"))]),
+        ]
+        diary = self._diary_with_days("2026-08-22")
+        diary["daily"] = {f"2026-08-{d:02d}": f"第{d}天" for d in range(1, 8)}
+        context.sleep_time_integrate(diary, datetime(2026, 8, 23, 23, 30))
+        self.assertIn("2026-08-22", diary["daily"])
+        self.assertEqual(len(diary["daily"]), 7, "新增后只留最近 7 天")
+
+    def test_today_not_touched(self):
+        """只有今天的消息 → 没有待整合的日期 → 不调 LLM 不动数据"""
+        diary = self._diary_with_days()
+        changed = context.sleep_time_integrate(diary, datetime(2026, 8, 23, 23, 30))
+        self.assertFalse(changed)
+        self.assertEqual(len(diary["messages"]), 2)
 
 
 class TestM4ReflectParse(unittest.TestCase):
@@ -617,6 +725,105 @@ class TestM6DailyWorkbench(unittest.TestCase):
         diary = {"summary": "", "messages": []}
         msgs = context.build_workbench("P", diary, "hi")
         self.assertEqual(msgs[-1]["content"], "hi")
+
+
+class TestContEmotionPerSentence(unittest.TestCase):
+    """连珠炮逐句情绪（2026-08-23 自研方案）：
+    连珠炮结构是程序钉死的（先翻旧账→控诉→委屈收尾），LLM 只填文本——
+    所以程序按"序号+文本特征"给每句标情绪，不赌 LLM 自觉输出 [joy] 式标签
+    （对比 OLV 的 LLM 内联标签，flash 会漏标）。语音语气+网页表情都逐句变"""
+
+    def test_angry_old_score_now_wo(self):
+        """经典三连：翻旧账→控诉→"呜…"委屈收尾 → angry, angry, sad"""
+        from xiaoli import chat
+        conts = ["你上次也这样放我鸽子", "你每次都这样", "呜…你都不在乎我"]
+        got = [chat._cont_emotion(c, i, len(conts), "angry") for i, c in enumerate(conts)]
+        self.assertEqual(got, ["angry", "angry", "sad"])
+
+    def test_angry_ending_without_sad_word(self):
+        """收尾句没有委屈特征 → 全程 angry（只有"呜…"才降成委屈）"""
+        from xiaoli import chat
+        conts = ["你上次也这样", "你每次都这样", "我真的很气"]
+        got = [chat._cont_emotion(c, i, len(conts), "angry") for i, c in enumerate(conts)]
+        self.assertEqual(got, ["angry", "angry", "angry"])
+
+    def test_calm_keeps_base_mood(self):
+        """平静聊天 → 原情绪，不做情绪过山车（即使带"呜"也不换）"""
+        from xiaoli import chat
+        conts = ["顺便一提", "呜…开玩笑的啦"]
+        got = [chat._cont_emotion(c, i, len(conts), "content") for i, c in enumerate(conts)]
+        self.assertEqual(got, ["content", "content"])
+
+    def test_single_sad_ending(self):
+        """只有一条补话且带"呜" → sad（idx==total-1 成立）"""
+        from xiaoli import chat
+        self.assertEqual(chat._cont_emotion("呜…你根本不在意", 0, 1, "angry"), "sad")
+
+    def test_update_face_mood_override(self):
+        """表情覆盖：mood_override 写进 face_state.js；不带 override 回落她真的心情"""
+        import os
+        import tempfile
+        from xiaoli import chat as chat_mod
+        tmp = tempfile.TemporaryDirectory()
+        old_file, old_heart = chat_mod.FACE_STATE_FILE, chat_mod.her_heart
+        chat_mod.FACE_STATE_FILE = os.path.join(tmp.name, "face_state.js")
+        chat_mod.her_heart = {"mood": {"primary": "angry", "intensity": 80}, "affection": 60}
+        try:
+            chat_mod.update_face("呜…", mood_override="sad")
+            with open(chat_mod.FACE_STATE_FILE, encoding="utf-8") as f:
+                self.assertIn('"sad"', f.read())
+            chat_mod.update_face("")  # 下一句开始/结束 → 表情回落到她真的心情
+            with open(chat_mod.FACE_STATE_FILE, encoding="utf-8") as f:
+                self.assertNotIn('"sad"', f.read())
+        finally:
+            chat_mod.FACE_STATE_FILE, chat_mod.her_heart = old_file, old_heart
+            tmp.cleanup()
+
+    def test_update_face_dual_write(self):
+        """双写修复（2026-08-23）：update_face 必须同时写根 data/ 和 web/data/——
+        网页相对路径 data/face_state.js 读 web/data/ 那份，只写一份网页永远拿不到 token"""
+        import os
+        import tempfile
+        from xiaoli import chat as chat_mod
+        tmp = tempfile.TemporaryDirectory()
+        old_file, old_web, old_heart = chat_mod.FACE_STATE_FILE, chat_mod.WEB_FACE_STATE_FILE, chat_mod.her_heart
+        chat_mod.FACE_STATE_FILE = os.path.join(tmp.name, "data", "face_state.js")
+        chat_mod.WEB_FACE_STATE_FILE = os.path.join(tmp.name, "web", "data", "face_state.js")
+        chat_mod.her_heart = {"mood": {"primary": "happy", "intensity": 60}, "affection": 90}
+        try:
+            chat_mod.update_face("双写测试")
+            for f in (chat_mod.FACE_STATE_FILE, chat_mod.WEB_FACE_STATE_FILE):
+                self.assertTrue(os.path.isfile(f), f"缺少: {f}")
+                with open(f, encoding="utf-8") as fh:
+                    self.assertIn('"happy"', fh.read())
+        finally:
+            chat_mod.FACE_STATE_FILE, chat_mod.WEB_FACE_STATE_FILE = old_file, old_web
+            chat_mod.her_heart = old_heart
+            tmp.cleanup()
+
+    def test_say_continuations_passes_per_sentence_emotion(self):
+        """集成：逐句 emotion 真的传到 voice.play_speech（语音语气逐句变）"""
+        from unittest import mock
+        from xiaoli import chat as chat_mod
+        old_heart, old_voice = chat_mod.her_heart, chat_mod.voice_on
+        chat_mod.her_heart = {"mood": {"primary": "angry", "intensity": 85}, "affection": 50}
+        chat_mod.voice_on = True
+        chat_mod._interrupted = False
+        captured = []
+
+        def fake_play(text, on_done=None, on_started=None, emotion=None):
+            captured.append(emotion)
+            if on_done:
+                on_done()  # 立即"播完"→ 循环进下一句
+
+        try:
+            with mock.patch("xiaoli.chat.voice.play_speech", side_effect=fake_play), \
+                 mock.patch("xiaoli.chat.time.sleep"), \
+                 mock.patch.object(chat_mod, "update_face"):
+                chat_mod._say_continuations(["你上次也这样", "呜…你都不在乎我"])
+            self.assertEqual(captured, ["angry", "sad"])
+        finally:
+            chat_mod.her_heart, chat_mod.voice_on = old_heart, old_voice
 
 
 if __name__ == "__main__":

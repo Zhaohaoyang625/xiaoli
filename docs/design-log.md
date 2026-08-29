@@ -425,3 +425,325 @@
   ① **patch 全局 os.path.isdir 期间 import 外部库 → 无限递归**：`mock.patch("xiaoli.whisper_stt.os.path.isdir")` 字符串路径解析 = patch **全局** os.path.isdir（whisper_stt 的 os 就是全局 os）。patch 生效期间 `_load()` 里 `from faster_whisper import WhisperModel` 触发 transformers 的目录结构探测（create_import_structure_from_path），isdir 全 True → 每层都当目录递归 → RecursionError。**解法：模块级预导入 faster_whisper（sys.modules 缓存后 from import 只取属性不重导）**。
   ② **mock.patch 第二位置参数是 new 值**：`@mock.patch("...os.environ", {"PATH": ...})` 的 dict 被当成 new（替换值）不是 spec——patch 生效但**不注入位置参数** → 后面参数全错位（missing arg）。**要改环境变量用 `@mock.patch.dict("os.environ", {...})`**。
 - 声音链路实测：本地克隆声（Qwen3-TTS）工作正常（合成 OK，显存 4.2GB/峰值 4.6GB）——"音色终极解法=GPT-SoVITS"仍是 9-5/9-6 排期项，用户未拍板。
+
+## AP. 复盘落地批1：语音四件套 + 台词-状态双向同步 + 指数半衰期（2026-08-23 晚，417 单测 + 17 e2e）
+对照 interaction-polish-review.md 的"立即做+核心升级"落地：
+- **静音段口型清零（真 bug 根治）**：queue item 从 (sr, pcm) 变 (sr, pcm, kind, gap) 四元组；**口型唯一真源从合成线程移到播放线程**——speech 播前张嘴（滚动延长）、silence 播前闭嘴（<pause/> 时嘴不再张着）、收工归零。原设计合成线程提前设 _speaking_until（"嘴动了声还没响"）、静音段不管（嘴张着）两个毛病一起修。
+- **标点感知句间停顿（sherpa silence_scale 的播放层版）**：固定 0.25s → _gap_for(s) 按句尾查表：终结符 0.30s（引擎已念 0.5-0.8s，只补衔接）/ 弱标点 0.15s（硬切断点别打断语流）/ **无标点 0.50s**（引擎没念全靠播放层，机关枪听感重灾区）。空串兜底 0.5（空 tail 会落进终结符分支的真 bug，测试抓到）。
+- **连续标点归一**：speakable() 加 ！！→！、？？→？、。。→。、…{3,}→……（保留双省略号拖沓感；GPT-SoVITS 实测多连标点干扰模型停顿判断）。
+- **起播保护期（Hermes barge_in grace_seconds 同款）**：play_speech 后 0.4s 内 in_grace()，call_mode 打断判定前先查——无 AEC 时她的起播声会从麦克风听到，不挡一下她会打断自己。
+- **台词-状态双向同步（MATE"表演连续性但不拥有它"三步闭环，用户实测"哄了也原谅了还生气"完整修法）**：
+  ① 台词锚定（生成前）：angry/jealous 时工作台末尾注入【台词边界】——禁止"我原谅你了/和好了/没事了"（C.ai"模型更信最近对话"实证→指令贴输出末尾）
+  ② 台词回写（生成后）：parse 后 temper_line_detected(spoken)（原谅词+否定排除）→ line_regress 沿降级链走一轮（-35，cause"我亲口说了原谅他的话"）；**双门闩**：只沿降级链绝不一步 angry→content + 一段小脾气只认一次账、认完 2 轮内不再认（防 C.ai 秒原谅崩盘）
+  ③ 承认钩子（UTSUWA strained event 先例）：程序轮判定刚心软 → 注入【你刚刚心软了】"软化中"过渡台词（嘴上端着已经软了）
+- **passage_soothe 指数半衰期（openfeelz halfLifeHours + ALMA 分层）**：线性 -6/轮 + 12h 硬切（二进制跳变）→ V = 45+(V0−45)·e^(−Δt/2h)，since 时间戳记"这口气从什么时候开始"（apply_temper jealous 首次触发时设，升级 angry 不刷新=同一段气），聊天加速器每轮额外 -6。刚触发时 Δt≈0 → 衰减项≈0，等价原线性（老测试原样通过）。
+- e2e 场景 7.5 断言同步新版"哄一次就心软"（75-35=40→content；85+ 才两轮，单测已锁）。
+
+## AQ. 复盘落地批2-1：Silero VAD 换能量阈值（2026-08-23 晚，429 单测 + 17 e2e）
+- **复盘点名**：打断检测器清一色 Silero VAD（模型），没有一家用纯能量阈值——我们是全行业唯一用固定峰值 500/2000 的（安静/嘈杂环境都会错判）。
+- **复用 faster-whisper 内置 ONNX**（faster_whisper.vad.get_vad_model，~2MB 随 pip 包分发零下载，比 silero-vad 包少一个依赖）。**接口坑**：不是 VadSession，是 SileroVADModel（纯函数式，__call__ 输入 512 倍数浮点数组 → 逐窗概率数组，每块独立重置状态）。
+- **参数移植 OLLVT 源码**（docs/research/sources/code-v2/ollvt/vad/silero.py）：prob≥0.4 **且** int16 RMS dB≥45 双条件 → 5 窗平滑 → 3 连击开口（0.1s）→ 24 连 miss 收尾（0.8s）。db 门槛 60→45：OLLVT 有浏览器 AEC 才敢用 60，我们没有 AEC（45dB ≈ int16 RMS 180，与旧 PEAK_VOICE=500 峰值同量级灵敏度）。
+- **接线**：监听分支 vad.feed() 替代峰值；打断分支保留峰值+VAD 双保险；`_talking(vv, data)` 提取成方法——VAD 未就绪（get() None）回退能量阈值（永远能听）。判定逻辑可单测后：假 VAD 断言 feed 被调用（能量未参与）+ None 回退峰值/静音。
+- **坑（自己踩）**：先写了个"假测试"（mock 一堆但断言一个不存在的 _vad_ready lambda）——测试要测真实判定逻辑，提取方法是最小重构。
+- **e2e 场景 7.5 不可复现修复（顺带发现）**：heart.json 残留真实会话的 angry 86 → 提女同事叠加到 100 → 哄一次 65 还酸着（断言 75-35=40 失败）。**e2e 测"小脾气链路本身"必须前提归一**（场景前显式重置 mood=content 45），否则对真实使用残留状态敏感。气头上叠加（86→100→哄65）本身是合理真人行为，产品逻辑不动。
+
+## AR. 复盘落地批2-2：怨气分层 grudge + 哄话强弱分级（2026-08-23 晚，444 单测 + 17 e2e）
+复盘清单 B-P1-1（ALMA 情绪分钟级/心情天级）+ B-P1-2（防"随口说爱你"秒消气）：
+- **grudge 怨气（0-100，天级半衰期 24h）**：heart.json 加 grudge + grudge_since。触发吃醋/升级每次 +15；哄只 -5（哄消情绪快、消怨气慢）；她亲口说原谅（line_regress）-10（比被哄更可信）；**衰减幂等**（同 apply_time_decay 模式：衰减生效后刷新 grudge_since 重新计时，同一时刻调 N 次结果一致——初版写成了 V=当前值·e^-Δt 递归扣到 0，测试抓到）。新小脾气起点 = max(60, 45+grudge//2)：平时记着仇、一碰就炸得更凶（grudge 80 → 触发+15 → 起点 92）。describe 注入：grudge≥50 翻旧账提示（「他上次还说…」）、≥20 小疙瘩、低没积怨。
+- **"哄了还生气"拆成两个真实问题**（复盘原话）：情绪没消 = 系统问题（mood，已修）；怨气记仇 = 人设（grudge，"记仇但记不过三天"，不该修）。
+- **哄话强弱分级**：SOOTHE_WORDS 拆 SOOTHE_STRONG（道歉/认错/承诺/补偿，-35 沿降级链）vs SOOTHE_WEAK（甜话/亲亲抱抱，只 -18）。强>弱（一句里都有按强算：道歉是主菜甜话是加分）。弱哄让 angry 变 jealous（"不炸了但还酸着"）但一轮和好不了——"说了半天甜话她怎么还气"有了解释：甜话不是道歉。没气时哄也 -5 怨气（没炸但记着账，甜话在慢慢化疙瘩）。
+- **sox 警告消除（顺带）**：qwen_tts 25Hz 子模块顶层 import sox → 每次启动刷一屏 "SoX could not be found!"。12Hz 推理路径不用 sox（源码确认仅 tokenizer_25hz）→ tts_local import 前 stub 顶替 sys.modules["sox"]，万一真走 25Hz 崩得明明白白。启动画面干净。
+- **自己的坑**：字符串里用了 ASCII 引号 " 包中文短语 → SyntaxError（U+2026 误导）——中文文案里要引号用「」。
+
+## AS. 复盘落地批2-3：AEC 回声消除（2026-08-23 晚，455 单测 + 17 e2e）
+复盘清单 A-P1-1。pyaec（speexdsp ctypes 封装，Windows wheel 直接装）：
+- **小测先验证再接线**（scripts/test_aec.py）：合成 far（她播 220Hz 女声）+ 50ms 延迟 -10dB 回声 + 你 140Hz 男声。**监听态（她播你听）消回声 12dB+、滤波器收敛**；**双讲（插话瞬间）speex 会误伤本人声**（c_speech 0.04）——老算法双讲缺陷（WebRTC AEC3 才擅长，pip 无可用绑定）。
+- **接线方案（三路 OR，由小测结论倒推）**：打断判定 = ①VAD(AEC输出) ②AEC输出峰值>正常阈值 ③**原始峰值>PEAK_INTERRUPT 兜底**。AEC 防的是反向事故：**音箱音量调大时回声峰值能过 2000 → 她打断自己**——AEC 消掉回声后①②判 False 不假打断；真插话（双讲）时你+回声叠加、原始峰值必过③——**真插话必打断不依赖 AEC**。细语插话靠①通道（AEC 消好时 VAD 正常灵敏度）。
+- **far 信号源**：voice.py 播放线程记录已送出 PCM（_record_playback，播前记，deque 上限 2s）+ get_recent_playback(ms) 取最近 200ms、24k→16k 线性降采样（先降再截尾——先截后降会把 200ms 变成 133ms，测试抓到）。speex filter_length 2000 样本（125ms：声学延迟 50ms + 房间混响）。
+- **发散防护**：far/rec 时钟漂移 → 滤波器发散（输出能量异常飙升）→ 连续 5 帧输出 RMS > 输入×1.5 → 重建实例重新收敛。
+- **真 bug（测试链抓到）**：_record_playback 在 `reversed(deque)` 遍历中 popleft → RuntimeError: deque mutated during iteration → 被 _play_worker 吞异常 → **播放线程静默死亡**（TestSpeakingFlag 第二次播放挂，表现为 speaking_until 恒 0）。修：先算 total 超了再删。
+- 未装 pyaec / 初始化失败 → aec.get() None → call_mode 走原逻辑（永远能打断）。启动零新增卡顿（Aec 懒加载）。
+
+## AT. 复盘落地批3：打断续说·正说到哪 + 打断冷却（2026-08-23 晚，460 单测 + 17 e2e）
+复盘清单 A-P1-3（"他打断你时你正说到哪"——OLLVT 已播文本+"..."先例）+ A-P2（打断冷却）：
+- **她被打断时能接着说完**：queue item 4→5 元组（末位 text，合成线程 put 时带上）→ 播放线程每句播前记 (_cur_text, _cur_dur, _cur_t0)（锁保护）→ 打断瞬间 chat.py 调 `voice.interrupted_tail()`：按已播时长比例估算残余字数，残余 <4 字返回 ""（刚开口=噪音）。
+- **注入独立变量 `_interrupted_tail`**：不能塞 `_unfinished`——349 行 `_unfinished = list(conts[i:])` 会覆盖（两套机制来源不同：_unfinished 是 LLM continuation 队列的残余，_interrupted_tail 是正在播那句的残余，合并注入不互斥）。
+- **A-P2 打断冷却**：打断生效记 last_interrupt，0.4s 内不再响应新打断——打断瞬间麦克风还带着尾音/回声，立刻再判会二次打断抖动。
+- 5 元组解包 `sr, pcm, kind, gap, *rest` 兼容旧 4 元组（防御）；新测试：比例估算（播 40% 残余 60%）、刚开口全句、快说完 <4 字 ""、静音段 ""、5 元组携带 text。460 = 455 + 5。
+
+## AU. 复盘落地批3-2：B-P2 心情变迁日志（2026-08-23 晚，430 单测 + 17 e2e）
+复盘清单 B-P2（状态变化日志——用户"她为什么这样"的长期解：终端「心情」查变迁史）：
+- **heart.json 加 mood_log 变迁史**（上限 30 条，超出丢最老；load 兼容补字段）：`_mood_log(heart)` 辅助函数——对比上一条，**primary 变了 或 强度差 ≥10 才算变迁**（防 LLM 每轮 ±5 自报刷屏），cause 取 mood.causes[0]（刚写入的最新原因）。
+- **接线点**：apply_temper（吃醋/升级/哄）、line_regress（亲口原谅）、passage_soothe（气慢慢消）、merge_llm_suggestion（LLM 自报）、apply_time_decay 三个分支各自（melancholy/气不过夜/一整天不理她）。
+- **坑**：apply_time_decay 最初在函数末尾统一调 _mood_log——log 为空时 diff 无从比较 → 无条件记一条（"没变化也记"）→ 移到三个分支内（没进分支就不记）。
+- 终端「心情」显示：现在心情 + 原因 + 最近 10 条变迁（时间/情绪/程度/怨气/原因，新→旧）。
+- **测试坑**：cap 测试断言"最老那条是 jealous"错——grudge 封顶 100 后吃醋起点 95，哄一次剩 60 还酸 → 再吃醋升级 angry 75 → 哄 → content——怨气满时更难哄是合理产品逻辑，断言改长度+时间戳格式。
+
+## AV. 网页端「她的心」面板（2026-08-23 晚，B-P2 的网页版延伸）
+终端「心情」命令的网页版——用户日常用网页聊天，终端命令看不见：
+- **WebBridge /heart 端点**：mood/intensity/affection/grudge/causes + 最近 8 条变迁（her_heart 全局，`(her_heart or {})` 兜底）。
+- **XiaoLi.html「更多」折叠加 ❤️ 她的心按钮**：点开显示心情/程度/好感/怨气 + 变迁史（新→旧），每 5 秒自动刷新，再点收起。
+- 复用 MOODS 中文映射（与表情联动同一份表）；escHtml 转义；bridgeDown 降级提示复用。
+- 真 HTTP 验证（教训：mock 测不到端点）——curl 带 token 打 /heart 返回真实状态 ✓。
+
+## AW. 节奏线收尾三小项 + e2e 场景1 前提归一（2026-08-23 晚，434 单测 + 17 e2e）
+复盘清单剩余项批量收尾（都是零风险纯增益）：
+- **C-P1-3 问句尾补话间隔取上沿**（chat.py _say_continuations）：补话若上一条以 ？/吗/呢/吧 结尾 → 间隔取 pause_range 上沿（激动 3.0s / 平静 4.5s，不走随机短端）——真人说完疑问句会等对方答，不会立刻自说自话。
+- **A-P2-1 打断来源短识别丢弃**（Pipecat min_words 同款思路，call_mode._finish 加 from_interrupt 参数）：打断瞬间 buf 从插话块开始，爆音/回声误判的插话常被识别成"嗯/啊"一两个字 → 发给 LLM 会触发她莫名其妙的回复。≤2 字丢弃（打印说明）；正常开口（非打断来源）说「好」照常发送（真回应不能丢）。
+- **C-P1-2 省略号三引擎念法验证完成**（scripts/test_ellipsis_tts.py 可复跑）：生成本地克隆/火山/edge 三份含 …… 的试听 wav（docs/research/tts-demo/ellipsis_*.wav）。数据：同句 edge 6.7s / 火山 2.8s / 本地克隆 1.4s——**引擎念法差异明显**，但 _gap_for 对省略号尾已有 _GAP_NO_PUNCT 0.5s 播放层兜底（tail="…" 落无标点档）→ **无需额外改动**。
+- **e2e 场景 1 前提归一**（批2 场景 7.5 教训的漏网之鱼）：全新空档案时主动回合 recall 无素材 → LLM 倾向 SILENT（"少而真"设计合法）→ e2e 连跑两次"选安静"失败。修：场景前塞一条"昨晚睡前他说想看日出"记忆 → 有说话的由头 → 稳定。**教训：e2e 场景 1 和 7.5 一样依赖 LLM 判断，都必须建干净且"有动机"的前提。**
+
+## AX. 提醒 SILENT 兜底（2026-08-23 晚，434 单测 + 18 e2e）
+**漏洞**（复盘"提醒必须响"设计的漏网之鱼）：handle_event 的 SILENT 分支只有"闲聊"有程序兜底，**提醒事件被 LLM 偶发 SILENT 吞掉 = 答应的事没做**（e2e 场景 5 过是因为有上下文时 LLM 会说，偶发 SILENT 时提醒就静音）。
+**修**：提醒事件 SILENT → 程序兜底直接说提醒内容（"齁～差点忘了，{content}"）——承诺兑现不赌 LLM 状态。
+**e2e 场景 10 回归**（mock proactive_talk 返回 SILENT → 断言她仍说话）——18 项全绿。
+
+## AY. 唱歌竞态修复 + 网页桥真 HTTP 验证（2026-08-23 深夜，436 单测 + 18 e2e）
+**漏洞（唱歌演出链，曲库有歌才暴露）**：_announce 报歌名用 voice.play_speech **非阻塞** → 立即 _play_song 同步播放。sounddevice 的 sd.play 是"替换"语义——后调用的顶掉先调用的：报歌名合成（1-2s）期间歌已开播 → 歌名合成完 sd.play 把歌顶掉（歌只播开头）；或歌名先响 → 歌的 sd.play 把歌名切断。**双声竞态，时序不定**。此前曲库只有 README.txt（无真实歌曲），从未触发——"曲库空不演"设计恰好掩盖了它。
+**修**：sing._speak_wait(text)——play_speech 挂 on_done Event + 30s 超时（on_done 在播完/失败/被打断都触发，不会卡死；播放系统炸了 → except set 继续演）。正常路径与失败兜底路径都走它。
+**测试**：+2（等待契约 on_done 必挂 / on_done 永不触发超时不卡）；mock 必须 side_effect 立即触发 on_done，否则 _done.wait(30) 拖满 30s（测试也要按真实语义 mock）。
+**网页桥真 HTTP 验证**（教训：上传/输入端点必须真 HTTP 验证，mock 测不到——multipart 坑同款）：无 token/错 token → 403 ✓；/send 空 → 400 ✓；500 字 → 截断 200 ✓；XSS 文本正常进对话（/recent 渲染有 escHtml 转义兜底）✓；/heart、/recent 正常 ✓。
+**测试教训**：真 HTTP 验证要选无害 payload——这次 curl（bash 命令替换 GBK 编码坏）和 python urllib 各发了一条测试消息（500字"测" + <script>），真进了她的对话流（她回复了），污染 2 轮 → 手动清理 diary（34→30）+ 重启进程（运行中进程内存会覆盖清理）。
+**边界记录**：唱歌期间主循环同步阻塞（清嗓→报歌名→整首歌）——真人唱歌时也不接话，可接受；提醒在唱歌期间到点会响（sing 不走 _speak_guard，与歌声并存=她唱歌时手机响，自然）。keep_talking 最多拖提醒 1-2 分钟（5/8/12s 等待+合成播放），属自然延迟；_round_done.set() 在 finally + on_done 兜底 → 无死锁。
+
+## AZ. call_mode stop/start 竞态修复（2026-08-23 深夜，440 单测）
+**漏洞**：stop() 只设 _stop Event 不等待收尾 → 网页/终端快速"通话关→通话开"时，start() 的 `if self.active`（旧线程 is_alive 还是 True）跳过 → 按钮显示"开"实际没监听。
+**修**：stop() 内 `t.join(timeout=1.0)` 等旧线程收尾（线程正常 <0.1s 退出；极端卡在 stream.read → 1s 超时不阻塞 start）。测试 +2（stop 后立即 start 真监听/从未 start 时 stop 不炸），全链路 mock（InputStream/read 抛异常驱动线程快退）。
+**call_mode 全链路审查结论（无其他问题）**：start 防重复/stop 干净退出；_loop 大 try 兜底（麦克风打不开打印后 return，finally 的 stream.stop 有 try 包裹——InputStream 构造失败时 stream 未定义也不炸）；打断标记 _interrupt_taken 在打断后第一次 _finish 必消费（不会残留误伤后续正常短话）；web /listen 与通话共享 listen_lock 互斥；AEC 三路 OR + vv_int 独立实例防状态污染；voice 的 is_playing/in_grace/get_recent_playback 全部线程安全。
+
+## BA. 提醒执行失败重试（2026-08-23 深夜，441 单测）
+**漏洞**（"提醒必须响"第二层补漏）：get_due_reminders 取出即标 executed 并保存 → handle_event 内部失败（LLM 超时/网络抖，739 行 except）→ 提醒**静默丢**（已 executed 永不重试）。SILENT 兜底只防"LLM 选了安静"，防不了"LLM 调用失败"。
+**修**：proactive.requeue_reminder(content)——失败时把提醒放回待执行（executed 撤销），下个 tick（1s 后）自动重试；**最多 3 次**（防死循环刷 API，连续失败必是网络挂了，恢复后重说一次即可），3 次后 dismissed + 终端打印。
+**坑**：requeue 第二次起匹配条件不能只靠 executed（已被撤销）→ `(executed or retries) and not dismissed`。
+**测试**：+3（失败放回再取到 / 3 次封顶 / 内容不匹配不动）。Scheduler 全链路审查无其他问题：missed 启动留话（终端）、出门跟进一次性（取即删）、热梗刷新 finally 重置（失败会重试）、提醒保留记录不无限增长（用户设置频率低）。
+
+## BB. 语义记忆链路假成功修复（2026-08-23 深夜，444 单测）
+**漏洞**（第二层假成功，同"bge 空目录降级运行"教训）：memory.py 三处 `import embed` 是**包内裸导入**——`python -m xiaoli.chat` 时 sys.path 只有项目根，`import embed` 必然 ModuleNotFoundError → 被 except 吞掉 → `_fact_vec` 永远 None → **bge 语义加分从未生效**（召回一直走字符 TF-IDF 兜底）。模型在、embed 单测也绿（直接 import 测试不经过 memory 链路）→ 假成功典型：层与层之间没打通。
+**验证**：修复前 `_fact_vec('他怕高')` 返回 None；修复后 512 维向量 + 怕高vs爬山 cosine 0.56（真语义命中）。
+**修**：三处 `import embed` → `from xiaoli import embed`。附带：_EMBED_CACHE 满 500 时淘汰一半最旧（之前全 clear → facts>500 时每轮全量重算慢 1-2s）。
+**测试**：+3（_fact_vec 真 512 维 / 缓存命中只推理一次 / 淘汰一半不全清）。
+**教训**：全项目扫"包内裸导入"——剩余裸导入全是第三方库，无同类问题。**假成功类 bug 的检测手段：直接调生产链路函数（_fact_vec）看返回值，而不是只信 mock 单测。**
+
+## BC. 主动说话频率排查：重启清零真相（2026-08-23 下午，444 单测基线不变）
+**现象**（用户反馈："现在这个程序还在后台跑，他还会主动和我说话"）：chat_history 里 15:45~16:32 每 7~12 分钟一条 assistant 主动消息，共 6 条——看似违反"闲聊保险 15 分钟限频 + 每日 2 次配额"。
+**排查**：Scheduler 各机制对不上频率（节奏窗口/提醒/特殊日/闲聊保险/出门跟进都不是）→ 查进程启动时间：PID 7500 = 16:29:36。**每条消息间隔 = 当天修 bug 反复重启进程的间隔**（重启 6 次）。
+**真相**：闲聊保险是内存态（_last_activity/_last_idle_chat/_budget_used 全在内存）——重启后清零 → 启动流程 mark_activity 初始化 → 3 分钟保险丝 → 她主动说一句。**不是 bug**：每次重启 = 她"醒过来"，醒来 3 分钟没互动说一句是刻意设计（真人醒着想你也会开口）。
+**附带验证（全链路干净）**：
+- voice.play_speech 的 on_done 契约 4 条路径全保证（speak=False 立即触发 / 正常播完 / 被打断 / 播放异常吞掉后仍触发）→ sing._speak_wait 不会白等 30s
+- world_brief.ensure_fresh 挂在 chat 主循环 2 处，24h 自动跨天刷新，失败降级不阻塞
+- 每日配额跨天靠内存日期判断（重启当天可能多 1-2 次主动，真人级可接受，不持久化）
+- 「提醒必须响」四层全链：SILENT 兜底 / requeue ≤3 次 / 关机错过 get_missed_reminders 启动补执行（chat.py:1051）/ 播放中让位等待
+- 数据健康：facts 4 条 / heart 正常 / chat_history 32 条（messages+summary+daily+emotion_line 结构全在，daily 为空是"未到压缩阈值"的正常态）
+**结论**：无代码改动。后续遇到"她话变多"先看进程启动时间与消息时间戳对齐度。
+
+## BD. 睡前回想（Letta Sleep-time Compute 落地，2026-08-23，451 单测）
+**来源**（研究 agent 对照学习）：Letta 24k star 论文 arXiv:2504.13171（UC Berkeley）——主 agent 管实时对话、后台 sleep-time agent 异步整合记忆（每 5 步触发，成本最高降 5 倍、状态基准 +18%）。小李已有"夜间静默 22-8 点"现成窗口，映射天然。
+**问题**：daily（每日一句话）/summary 只在"对话超长压缩"时被动生成（compress 阈值 60 轮）→ 日常聊天 daily 永远是空的，第二天她"翻旧账"无出处（build_workbench 的【近日回顾】一直空转）。
+**落地**：context.sleep_time_integrate(diary, now)——每晚 23 点后（她"睡了"）把过去几天的对话整理进记忆：每个未整合日期生成一句 daily + 链式合并 summary/emotion_line + 移除已整合的旧消息（记忆入摘要后消息本体压缩掉）。**两阶段提交**：全部 LLM 调用先算完（不写状态），任何失败 → 什么都不提交、消息不动、明天再试（记忆不丢）。幂等：daily 键在的日期跳过（与 compress 的 daily 兼容互斥）。
+**接线**：proactive.Scheduler 加可选 on_sleep_integrate 回调（23 点后每 tick 检查，幂等）；chat.py 包装层防重入（LLM 几秒 > tick 1 秒）+ 持 diary_lock（与主线程写日记互斥）。**坑**：睡前回想必须在 `if not passive:` 判断**外面**（她睡了 passive=True 反而正是干活的时候——一开始插进块内，测试抓出 23:00 不触发）。
+**测试**：+7（整合成功/幂等不调 LLM/失败全不提交/7 天上限/今天不动/Scheduler 23 点前后触发/无回调安全）。**教训**：测试里 `datetime.now()` 和固定日期混用，跨午夜运行时"今天"漂移导致断言翻车——测试日期全部写死。451 全绿。
+
+## BE. 连珠炮逐句情绪程序注入（2026-08-23，457 单测）
+**来源**（对照 OLV 13k 的逐句情绪标签）：OLV 让 LLM 回复内联 `[joy]` 标签、`extract_emotion()` 逐句提取——每句一个情绪，贴表情节奏。但小李已实证 flash 在长上下文会漏标/跟错（提醒标签重试 3 次教训）——**LLM 自报格式不可赌**。
+**自研方案**（比 OLV 更稳）：连珠炮的**结构**是程序钉死的（【情绪指令·必做】：先翻旧账→控诉现在→"呜…"委屈收尾，spoken 一句短控诉 + continuation 2~3 条），LLM 只填文本——**程序拼的结构程序就知道每句的意图**，扫文本特征标情绪，零 LLM 纪律风险：
+- `_cont_emotion(cont, idx, total, base)`：angry 连珠炮场景下，收尾句（idx==total-1）带委屈特征（呜/委屈/哭/泪/伤心/难过/鼻子酸）→ **sad**（音调低语速慢，真人吵完"呜…"的余韵）；其余 → **angry**（翻旧账/控诉都还在气头上）
+- 平静聊天 → 原情绪（不过度表演，不搞情绪过山车）
+**接入点**（两条通道都逐句变）：`voice.play_speech(emotion=em)` 语音语气逐句变；`update_face(cont, mood_override=em)` 网页 Live2D 表情逐句换（override 只在补话期间生效，播完/下一句回落她真的心情）。
+**坑**：on_started 口型同步回调也得带 override（lambda 默认参数钉值防闭包循环捕获）——否则开播瞬间表情先弹回真值再等下一句覆盖，表情会闪一下。
+**测试**：+6（经典三连 angry/angry/sad / 收尾无委屈词全 angry / 平静带"呜"不换 / 单条收尾 sad / update_face override 写入与回落 / 集成——emotion 真传到 play_speech 序列）。457 全绿 + e2e 17 项全过。
+**附带排查**：睡前回想提交阶段 `diary["emotion_line"]` 无 KeyError 隐患（load_diary 已 setdefault 兼容 v1）；锁外计算重滤 messages 只留今天（整合期间新消息不受影响）。
+
+## BF. 反面教材研究 + 矛盾记忆消解（2026-08-23，463 单测）
+**研究**（用户方法论：10k+ star 项目"没做的功能"可能是测试过效果不好放弃的）：4 项目放弃项证据链全拿到（docs/research/abandoned-features.md）——Mem0 放弃 LLM 四选一记忆决策（→ADD-only，代价 issue #4956 矛盾记忆累积至今挂着）、放弃外部图库；OLVT 移除 RAG（"coming back soon"一年没回来）、MemGPT 集成标 "broken" 后删；Letta V1 整个退役；SillyTavern 砍 10 个内置扩展。**跨项目共性：LLM 自动改删记忆全翻车；重基础设施记忆必死；上游改名=集成判死刑；重写时边缘功能陪葬**。
+**落地**（Mem0 issue #4956 教训 → 小李 v2 M9 矛盾消解）："我在腾讯上班"→"我跳槽去字节了"两条矛盾事实共存，召回时 LLM 同时看到两个版本。保守版：新事实带转变/否定词（不/没/别/戒/改/换/现在/再）+ 与旧事实共享核心词（bigram）→ 旧事实标 `superseded`（历史保留可追溯，召回不再注入 = Graphiti invalid_at 轻量版）。只扫最近 20 条（全扫存记忆会慢）。
+**关键实测**（为什么不用 bge 向量消解）：反义句"爱吃香菜"vs"再也不吃香菜"余弦只有 **0.65**，而并存不冲突的"喜欢奶茶"vs"喜欢果茶"却 **0.856**——向量相似度分不清"矛盾"和"相似"，纯向量阈值漏真矛盾、误伤真并存。**教训：语义消解不能靠相似度，要靠显式否定信号**（bge 适合"召回相关"不适合"判定矛盾"——两种任务对相似度的解释相反）。
+**测试**：+6（香菜消解 / 历史保留不删 / 无转变词并存 / 带转变词但无共享词不消解 / 只扫最近 20 条 / recall 跳过 superseded）。463 全绿。**坑**：Edit 插入把 TestRecall 剩余方法夹进新类（TypeError 抓出）；`_mk` 不支持 superseded 参数需手工构造。
+
+## BG. 双模型启动链路三连修：sox stub 真 bug + 并行 preload 显存竞争 + stdout 缓冲误诊（2026-08-23，470 单测）
+**背景**（用户："检查有没有隐藏的问题"）：检查本地克隆链路时抓到两个真 bug + 一次误诊，修复后启动链路 100% 干净（8 项自检 [OK] + whisper 7s + TTS 6s 串行就绪 + 470 测试全绿）。
+
+**① sox stub 无差别 `__getattr__` 真 bug**（本地克隆一直静默降级火山）：
+`sys.modules["sox"]` 顶替 stub 的 `__getattr__` 无差别返回函数 → torch 导入链 inspect.getsourcefile 对模块 `__file__` 调 `.endswith` → `"function object has no attribute 'endswith'"` → 整个 `_load()` 抛异常 → **用户听到的一直是火山音色**（克隆 0 元/月失效）。修复：stub 给真实 `__file__` 字符串 + 缺失属性抛 AttributeError（模仿真实模块语义）。回归测试 TestSoxStub 3 项（端到端验证 stub 下加载成功）。
+
+**② 并行 preload 显存峰值叠加**（TTS 加载卡死 2.5 分钟）：
+whisper（CTranslate2 int8 ~1.5G）+ Qwen3-TTS bf16（加载峰值 4.5G+）**同时**后台加载 → 逼近 8G 上限 → TTS 加载卡死无结果。修复：`whisper_stt.wait_ready()` 轮询等 whisper 就绪（失败降级不阻塞）→ chat.py 串行化预热（whisper → TTS → VAD）。串行后 6~9 秒就绪，总启动 ≈13 秒。
+
+**③ stdout 缓冲误诊"卡死"**（本轮最大教训）：
+②修复后重启，进程 125+ 秒"无就绪打印" → 误判又卡死（杀了进程，白跑一轮排查）。真相：stdout 重定向到文件是**块缓冲**，`print` 憋在缓冲区不落盘；只有 stderr 的 transformers 警告（无缓冲）实时出现——"没看到就绪打印 ≠ 没就绪"。铁证：复现脚本（完整模拟加载顺序）线程内 6.3s 正常就绪；且当时手动 `_load() = True (8.4s)` 是**在卡死进程还在跑时并行成功**的——两个 TTS 进程同时加载都成功，进程根本没卡。修复：模型加载/合成的关键 print 全部 `flush=True`（就绪/失败/合成OK 实时可见，诊断不再靠猜）。**教训：判断后台进程状态，先排除 stdout 缓冲，再看线程/显存**。
+**附带成果**：scripts/repro_tts_hang.py 复现脚本保留（whisper→TTS 串行回归验证，占真显存不进 pytest）。
+
+## BH 通话模式全链路大排查（2026-08-23 晚，用户"一测试就是各种问题"）
+
+触发：VAD 2D 修复后用户仍反馈"听不到 + 容易被杂音打断"。日志铁证：识别成功但「听你说完 115.0 秒/18.0 秒」——判停被环境人声拖死；打断频繁。两个 Explore agent 深挖 call_mode/voice/aec 全链路 + 自己核对日志，共修复 14 处：
+
+**A. 判停/打断（用户症状直接对应）**
+1. **判停拖死**：环境人声（游戏/视频里的人话）prob 0.4~0.6 把 VAD 状态机 speech 拖住 → 判停等十几秒甚至 20s 截断。修复：判停改数"连续 0.8s 无**强语音窗**"（vad.PROB_STOP=0.5 块级判定 last_voice，独立于状态机）——环境人声漏空隙判停，近麦真说话 0.7+ 不受影响。
+2. **AEC 生产链路从未运行（最大坑）**：aec.feed 收到 (1600,1) 二维 → `np.pad` 负宽必抛 → 回退返回原始音频前 320 样本 → 打断"clean 峰值>500"变 500 低阈值后门 → **装了 pyaec 反而更容易被回声/杂音打断**（用户"杂音打断"直接根因）。且 far 参考信号与真实播放位置错位（6.4）、VAD 窗长不匹配 320<512（6.3，细语通道死代码）。修复：三处断链修完需真声学验证，验证前**强制 ec=None 走纯动态阈值路径**（打断 = raw > max(2000, 播放峰值×0.4)），TODO(AEC) 标注。
+3. **打断动态阈值**（上轮）：回声峰值过固定 2000 → 她打断自己。阈值随播放音量抬升（ECHO_RATIO=0.4，-8dB 衰减余量）。
+4. **grace 起播保护锚点错**：锚在 play_speech 入队时刻，合成耗时（数百 ms~数秒）耗光 0.4s → 第一声响时保护已过期。修复：锚到播放线程第一次 sd.play 前。
+
+**B. 播放链路（voice.py，agent 报告 3 高危）**
+5. **P 卡 queue.get() 永久卡 True**：T 被打断 return 不投哨兵 + get 无超时 → is_playing 永久 True → 通话模式永远走打断分支 → 失聪，stop_playing 救不了。修复：get(timeout=0.2) 每 0.2s 醒查 gen；T 包 try/except finally 必投哨兵（4B）。
+6. **`_playing.clear()` 无代际守卫**：旧线程收工清掉新线程标记 → is_playing 假 False → 她声音还在响通话模式却恢复监听 → 鬼打墙。修复：`if gen == _gen` 守卫（同 _speaking_until）。
+7. **队列项带代际 (gen, item)**：旧 T 迟到入队的陈旧句/陈旧 None 哨兵会插进新播放（6A）——P 出队校验代际丢弃，哨兵必须投且带旧 gen 自然失效。
+8. **并发 sd.play 第二流失败静默丢句**（4A）：play_speech 起新线程前 sd.stop()；静默返回路径也 sd.stop()（6B 防清了 _playing 声音还在响）。
+
+**C. 监听线程（call_mode.py）**
+9. **识别在锁内 10~25s**：_finish 同步火山识别（最坏 ~25s）持有 listen_lock → 网页🎤干等、识别期间麦克风音频全丢。修复：_finish 移到锁外（识别期间麦克风本来就该停，锁让给按键说话）。
+10. **read(frames) 无 timeout**：设备故障/被占用 → 线程无限卡 read → stop() join 超时 → active 永远 True → 再点"开"被跳过（听不到且无报错）。修复：stop() 强制 close 流唤醒 read + join 再超时强制重建 _thread=None。
+11. **主分支一次 read 异常 → 整线程死亡**（1.1）：局部 try + 连续 5 次失败才退出（网页按钮 call_on 同步能感知）。
+12. **VAD 单例状态残留**（5.1）+ **_interrupt_taken 跨会话泄漏**（2.3）：start() 重置——vad.reset() 新建实例、标记归 False（否则重启后首句短回复被当回声丢弃）。
+13. **打断分支冻结 buf**（2.1）：她开口时你正在说 → 直接丢弃半句（防她播完后新旧拼接怪 PCM）。
+14. **vad.get 失败每 0.1s 同步重载**：失败冷却 1s；打断分支 read 异常加 sleep 防 100% CPU 热循环。
+
+**D. 网页状态**：update_face 加 call_on 字段 → 按钮跟随真实监听状态（线程死/重建时自动拉回"关"）。
+
+测试：队列格式改动适配 test_stream（旧测试等 None 死循环卡住 pytest——队列项变 (gen, item)）；新增 last_voice/动态阈值/vad.reset 测试。**485 全绿**。设计取舍：4.2 轻声说话（prob 0.4~0.5）可能被强语音窗判停截断——用户正常音量说话不受影响，实测后再调。
+
+## BI. 打断设计移除（2026-08-23 深夜，486 单测）
+
+**用户实测反馈**："字出来很快但她半天不说话" + "好不容易她说话了，我又说话，她又不说（完）了"。全链路实测（真实 play_speech：本地合成 2.4s → 播放完成 on_done 触发）证明播放链路无问题——**真相是打断太灵敏**：她刚开口用户插话 → stop_playing 掐掉整段 → 用户听感"她没说话/话说不完"。
+
+**用户拍板**：不加打断设计，去掉。通话模式恢复纯半双工（一来一回像打电话）：
+
+- **call_mode.py ①分支**：删掉整条打断链路（起播保护 → 动态阈值 → AEC 三路投票 → INTERRUPT_BLOCKS 连续块确认 → 冷却 → stop_playing 掐话）。她说话期间（is_playing）麦克风只 read 丢弃，她说完（_playing clear）→ 回正常监听，用户的话进下一轮识别回复。
+- **删变量**：`vv_int`（打断专用 VAD 实例）、`last_interrupt`（打断冷却）。`_interrupt_thresh`/`_interrupt_vote`/`PEAK_INTERRUPT`/`ECHO_RATIO`/`in_grace` 保留可查（想恢复打断捞分支即可）。
+- **保留**：chat.py 两处 `stop_playing()`（用户打字/按键说话时停主动播报，与语音打断无关）；AEC TODO 保留（恢复打断时再修）。
+- **voice.py**：顺手修 `_play_worker` 的 `_grace_until` 缺 `global` 声明 bug（局部变量遮蔽——in_grace 永远 False）；P 线程 `except Exception: pass` 改打印异常（静音比日志吵更糟）。
+
+**测试**：新增 TestNoInterruptDuringPlayback——mock is_playing 序列 + read 序列，断言她说话期间 stop_playing 零调用、读到的数据零识别。**486 全绿**。
+
+## BJ. 四感优化：话多/间隔/语音延迟/识别精度（2026-08-23，用户实测 4 反馈）
+
+**反馈**：① 文字出来了语音还要等很久 ② 每句话之间间隔有点长 ③ 话多——说一句回好几句还必须听完 ④ 识别和我说的有点差距。
+
+**根因**：
+1. **语音慢** = 硬切上限 48 字 → 首句最长 48 字 ≈ 10s 音频，本地克隆 2x 实时 ≈ 5s 合成才出声。修：`_MAX_SENTENCE` 48→24（首句 ≤24 字 ≈ 2.5s 内出声；24 字=一句自然短句）。
+2. **间隔长** = 平静补话间隔 3.0~4.5s（每条补话要干等 4 秒）+ 终结符句间补 0.30s（引擎已自带 0.5-0.8s 停顿）。修：平静 (2.0, 3.0)（砍掉上沿，下限保 2.0s——实测 <1.5s 机关枪）、激动 (1.5, 2.5)；_GAP_TERMINATOR 0.30→0.20、_GAP_NO_PUNCT 0.50→0.35。
+3. **话多** = continuation 硬上限 3 条，LLM 平静也爱写。修：**情绪裁剪**——激动（angry/jealous/sad/anxious/melancholy/excited）最多 3 条（连珠炮保留），平静最多 1 条（教法管不住，程序钉死）。裁剪掉的不进 _unfinished（续接拿裁剪后的列表，天然不吐）。
+4. **识别差** = beam_size=1（贪心解码，快但同音字易错）。修：beam_size=5（GPU 上延迟几乎无感，large-v3 换更准的搜索）。
+
+**测试**：硬切 88 字 48→24 上限 = 4 段；beam 断言 1→5。**486 单测 + 17 e2e 全绿**。
+
+## BK. 断句"停挺久"调查：0.53x 实测 + 16 字上限 + PH 占位符（2026-08-23 深夜）
+
+**用户投诉**："有啦有啦，人家聽得到～你剛剛跑去哪裡了啦，怎麼講到一半就消失" 在逗号处停挺久才说后半——"这是一句话吧"。
+
+**排查三层，最后真相在合成速度**：
+1. 设计 gap 只有 0.15~0.35s，不是它。
+2. 火山/edge 音频头尾静音 <0.3s，不是它。
+3. **实测本地 Qwen3-TTS 合成速度 = 0.53x 实时**（合成 1s 音频要 ~1.9s；memory 里记的"2x 实时"是错的——3 次复测都是 0.52~0.54x）。44 字两句：句1 播放 3.44s 时句2（7.6s 音频）还在合成 → 播放完干等 ~4s，听感"卡住/消失了"。
+
+**等待方程**：句间等待 = 1.9 × 下一句音频秒 − 当前句播放秒。16 字 ≈ 2.6s 音频 → 等 1.4~2.3s（"她想了一下"，可接受）；24 字段 → 等 4s+（"卡住"）。
+
+**修复**：
+- `_MAX_SENTENCE` 48→24→**16**：短句流水线——首声 = 第一段（~1.5s 内出声），句间空等 1.4~2.3s 像"在想"，不再 4s 卡死。16 字也够一句自然短句（"有啦有啦，人家聽得到～"正好 13 字）。
+- **PH 占位符**（PAUSEHOLD→$¶→PH 三代）：13 字符 `PAUSEHOLD1500` 会被 16 字硬切从中切断（停顿错位+碎片句）→ 换单字符 $¶ → **被 speakable 清洗删除**（只留字母数字，裸数字残留成"1500你聽我說"噪音）→ 最终 **PH+毫秒**（2 字符纯字母数字，硬切天然免疫、清洗天然通过）。`_is_trivial` 不再需要 $¶ 特判。
+
+**加速尝试全灭**（已穷尽）：torch.compile（Qwen3TTSModel 无 .compile；内部 m.model compile 后 2.75→2.81s 反而更慢）、do_sample 变体（0.52~0.54x 无差）、双线程并行生成（GPU 瓶颈吞吐×1.9 但第二句就绪更慢）、flash-attn Windows 不可用、non_streaming_mode=False 只是"模拟流式输入"不是真流式。
+
+**真正的长期修复 = GPT-SoVITS v4**（9/5-9/6 训练，用户已通知）：合成速度 ~10x 实时，25s 音频 2.5s 出——届时 16 字上限可放宽回自然断句。
+
+**测试**：硬切 88 字 → 6 段（16 上限）；逗号切长句 2 段、短句不切；PH 全套（默认/毫秒/钳制/硬切免疫）；TestPauseTags 同步 $¶→PH。**488 全绿**。
+
+## BL. 僵尸代码清理第一轮（2026-08-24，477 全绿）
+
+用户要求"随时检查代码"→ vulture 全库扫描（xiaoli/ + scripts/）清理 13 处：
+
+**打断功能残留全清**（用户 2026-08-23 拍板不加打断，这些是生灰死代码；git 历史可捞）：
+- call_mode.py：`_interrupt_thresh`/`_interrupt_vote`/`PEAK_INTERRUPT`/`INTERRUPT_BLOCKS`/
+  `INTERRUPT_COOLDOWN`/`ECHO_RATIO`/`_interrupt_taken`/`from_interrupt` 短识别丢弃逻辑
+- voice.py：`in_grace()`（_grace_until 保留，播放线程仍维护）
+- 连带删 4 个打断测试类/函数（TestInterruptThresh/TestShortInterruptDrop/TestGracePeriod/
+  test_interrupt_vote_three_way_or/test_talk_phase_raw_peak_still_interrupts）
+
+**纯死代码**：handle_event 的 `extra` 参数+死赋值 `event_msg`（曾想给 LLM 但重构没接上）、
+`is_recording`（set_recording 保留——stt.py 在调）、`clear_promise`（承诺清理在 promise_hint 内）、
+`speak_voice`、`KEEP_TALKING_MAX_ROUNDS`、`COMFORT_STAGES`、`DOCS_DIR`、2 个 unused import
+
+**有意保留（非僵尸）**：do_GET/do_POST/log_message（HTTP 基类动态调用）、sox stub 属性
+（动态 __getattr__）、aec.py FAR_MS/ec/get_recent_playback（AEC TODO 待修复时用）
+
+**教训**：vulture 是死代码扫描器（pip 一次），60% 置信度约 22 项里 13 项真僵尸——低置信度
+要人肉判（动态调用/HTTP 方法/接口保留是常态误报）。**僵尸的根源是"功能移除不删代码"**——
+打断移除时留了"可捞回"，一留就生灰；以后功能移除连代码带测试一起删（git 历史就是保险）。
+
+**测试：488 → 477**（-11 个死测试，零功能变化），全绿。
+
+## BM. GPT-SoVITS 环境前置完成（2026-08-24）
+
+9/5-9/6 训练的全部前置一天备齐（用户上班，电脑空闲利用）：
+- 代码（gh-proxy）+ 权重 4.9GB（ModelScope XXXXRT 镜像，校验通过）+ G2PW + nltk
+- miniconda + gsv(py3.10) 独立环境 + torch 2.9.1+cu128（RTX 5060 验证 cuda: True）
+  + 100+ 依赖（funasr/onnxruntime-gpu/gradio/modelscope…），训练模块 import 验证通过
+- 训练语料 80 句/3.9 分钟（火山"甜美台妹"合成台湾腔台词，list.txt 标注格式）
+- 踩坑记录在 C:\Users\18019\GPT-SoVITS\INSTALL-NOTES.md（opencc wheel/pyopenjtalk 跳过/
+  jieba_fast 跳过/conda26 ToS/ModelScope 假 200）
+- 剩余：9/5 前试运行验证 + 语料可补到 5-6 分钟
+- 附：int8 量化实验失败实证（torchao 手动量化 talker：0.39x < bf16 0.54x，Windows 无 Triton，
+  int8 加速全部关闭；对比音频在 docs/research/tts-demo/int8-compare/）
+
+## BN. sherpa-onnx 流式识别深度研究（2026-08-24）
+
+**背景**：响应延迟痛点（说 5 秒 → 静音 0.8s → whisper GPU 推理 1~2s → LLM），
+目标是"说一句出半句"——边说边出字，说完整句立即有全文。
+
+**研究结论**（docs/research/sherpa-streaming-asr.md，本机全实测）：
+- sherpa-onnx（k2-fsa，~21k⭐）：流式 zipformer 中文 int8 模型 132MB（2025-06-30 新版）
+- **RTF 0.067（CPU 4 线程）**——识别 3 秒音频只要 0.2s，加载 ~1s；whisper large-v3 GPU 一次 0.5~2s
+- 流式 partial 实测："刚刚"→"刚刚去便利商店买了关东"→全文（边说边出字实锤）
+- **准确率对比（80 条台湾腔语料）**：sherpa 75/80 内容正确，whisper 80/80——
+  whisper 对短促口语词强（要不要/空腹/蚵仔煎/好啦），sherpa 听错 5 条
+- **结论：不能无脑替换，双通道**——通话模式 sherpa 流式（延迟优先）+
+  whisper 保留（准确率优先/降级），一键切换
+
+**已落地**：pip 装 sherpa-onnx 1.13.6（清华源）；模型 132MB 下载到 models/sherpa/
+（hf-mirror 700KB/s，gh-proxy 只有 58KB/s——教训：GitHub release 大文件优先 hf-mirror）；
+scripts/sherpa_stream_test.py 可复跑（RTF + 准确率对比）
+
+**踩坑**：尾部必须喂 0.66s padding 再 input_finished（否则句尾丢字）；
+HF 上 decoder.onnx 不带 .int8（decoder 无状态不需要量化）；
+模型输出简体需 opencc 转繁（s2t 会把"吃"转"喫"——对比用 t2s+相似度容差，不做精确匹配）
+
+## BO. sherpa 流式接入通话模式 + 桌面通知 toast（2026-08-24）
+
+**sherpa 落地**（紧接 BN 研究）：
+- 新模块 xiaoli/sherpa_stream.py：懒加载识别器（线程安全、失败标记不反复重试）、
+  Session（feed 每 0.1s 块 / finalize 尾部 0.66s padding）、begin() None=降级
+- call_mode.py 改造：开口块流式喂入（STT_STREAM=True），说完 finalize 即全文——
+  "说完等 whisper 1~2s" 变 "说完即全文零等待"；空/不可用 → whisper 兜底
+- _finish 先取走 _sess 清空（咳嗽一声残留不污染下一句）；config.py 开关 STT_STREAM
+- 测试：tests/test_sherpa_stream.py 14 项（懒加载/归一化/padding/降级/开关/残留）
+  坑：decode_stream 是 recognizer 的方法不是 stream 的（断言对象）
+  491 全绿
+
+**toast 桌面通知**（todo 项"她在别的窗口时也知道她找你"）：
+- xiaoli/toast.py 零依赖：PowerShell 调 WinRT 原生 toast（Win10/11 自带）
+- 中文走 -EncodedCommand（UTF-16LE base64）绕开 GBK 控制台；CREATE_NO_WINDOW 不闪黑窗
+- 首次调用注册 AppUserModelID（reg add，未注册 appid 可能不弹）
+- 挂 chat.py handle_event：她确定要开口（含提醒）→ 弹"小李找你"+ 预览前 60 字
+- 失败静默降级（弹不出不耽误说话，只警告一次）；后台线程不阻塞
+- 测试：tests/test_toast.py 5 项（编码/截断/单引号转义/静默/注册幂等）
+  496 全绿
+
+## BP. Smart App Control 拦 PyAV DLL → 本地识别静默降级（2026-08-29）
+
+**症状**：启动自检 [OK] 但跟一句"本地识别模型加载失败：DLL load failed while importing stream:
+应用程序控制策略已阻止此文件"（自动用火山识别——功能没断但开始烧钱）。
+
+**根因**：Windows 11 Smart App Control（智能应用控制）**强制模式**（注册表
+`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy\VerifiedAndReputablePolicyState=1`）。
+它只放行微软信誉库认可的文件——PyAV 18.1.0 的 DLL（2026 新版，信誉未收录）被拦；
+sherpa-onnx / onnxruntime / ctranslate2 的 DLL 都在信誉库 → 不拦。8/22 装 av 时
+SAC 未开（或未拦），后来策略生效 → "之前好好的突然坏了"。
+
+**修复**：`pip install av==13.1.0`（2024 版，DLL 在信誉库）→ import 恢复，
+faster-whisper 完整可用（faster-whisper 1.2.1 要求 av>=11，兼容）。
+真实验收：GPU 加载 + 3 句语料转写全对（001/002/003）。
+
+**教训（验收铁律的又一实证）**：mock 测试全绿 ≠ 真机可用——这轮是"SAC 拦 DLL"
+这类环境级故障，单测完全覆盖不到；启动自检要真 import 才能抓到（当前自检
+只查文件存在，不查 import——改进点，见 TODO）。
+
+**备忘**：SAC 强制模式会继续拦"信誉不足"的新 DLL——以后 pip 装新包若报
+"应用程序控制策略已阻止此文件"即此因，优先降级到旧版包（或考虑让用户关 SAC）。

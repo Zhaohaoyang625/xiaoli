@@ -140,3 +140,44 @@ class TestEmbedReal(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMemoryChainEmbed(unittest.TestCase):
+    """2026-08-23 修复回归：memory.py 的语义链路必须真走 bge——
+    之前包内裸 `import embed` 静默失败 → _fact_vec 永远 None → 召回一直降级 TF-IDF
+    （假成功：模型在、测试也绿，但 memory 链路从没真正用过向量）。"""
+
+    @unittest.skipUnless(
+        os.path.exists(embed.MODEL_PATH) and os.path.exists(embed.VOCAB_PATH),
+        "bge 模型未下载")
+    def test_fact_vec_real_embedding(self):
+        """_fact_vec 返回真 512 维向量（不再 None）"""
+        from xiaoli import memory
+        v = memory._fact_vec("他怕高")
+        self.assertIsNotNone(v, "语义链路修复后必须有向量")
+        self.assertEqual(len(v), 512)
+
+    def test_fact_vec_cache_hit(self):
+        """同内容两次 → embed 只调一次（缓存复用）"""
+        from xiaoli import memory
+        memory._EMBED_CACHE.clear()
+        fake = mock.Mock()
+        fake.run.return_value = [np.array([[[1.0, 0.0, 0.0]]])]
+        with mock.patch.object(embed, "_load", return_value=True), \
+             mock.patch.object(embed, "_session", fake), \
+             mock.patch.object(embed, "tokenize",
+                               return_value=(np.zeros((1, embed.MAX_LEN), dtype=np.int64),
+                                             np.ones((1, embed.MAX_LEN), dtype=np.int64))):
+            memory._fact_vec("测试内容")
+            memory._fact_vec("测试内容")
+        self.assertEqual(fake.run.call_count, 1, "缓存命中不该重复推理")
+
+    def test_cache_evicts_half_not_all(self):
+        """缓存满 500 → 淘汰一半（防 facts>500 时每轮全量重算）"""
+        from xiaoli import memory
+        memory._EMBED_CACHE.clear()
+        for i in range(510):
+            memory._EMBED_CACHE[f"k{i}"] = None
+        memory._fact_vec("新内容")  # 触发淘汰
+        self.assertLessEqual(len(memory._EMBED_CACHE), 260, "应淘汰一半而非清空")
+        memory._EMBED_CACHE.clear()

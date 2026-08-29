@@ -20,7 +20,9 @@
 
 import glob
 import os
+import sys
 import threading
+import types
 
 import numpy as np
 
@@ -34,6 +36,31 @@ _model = None
 _clone_prompt = None
 _model_lock = threading.Lock()
 _loading = False
+
+
+def _make_sox_stub():
+    """构建 sox stub（qwen_tts 顶层 import sox → 顶替，杜绝 "SoX could not be found!"
+    刷屏；12Hz 推理路径完全不用 sox，25Hz 路径调用 → 清晰 ImportError）。
+    坑（2026-08-23 实测抓出）：必须给真实 __file__ + 缺失属性抛 AttributeError——
+    torch 导入链会 inspect 已加载模块（inspect.getsourcefile 对 __file__ 调 .endswith），
+    无差别 __getattr__ 返回函数 → "function object has no attribute 'endswith'"
+    → 整个本地克隆加载失败降级火山（用户听不到克隆音色）。"""
+    _stub = types.ModuleType("sox")
+    _stub.__file__ = "<sox stub>"
+
+    def _sox_missing(*_a, **_k):
+        raise ImportError("sox（pysox）不可用：仅 qwen_tts 25Hz 响度归一化需要，"
+                          "12Hz 推理路径用不到（已用 stub 屏蔽）")
+
+    _stub.Transformer = _sox_missing
+
+    def _sox_getattr(name):
+        if name == "Transformer":
+            return _sox_missing
+        raise AttributeError(f"module 'sox' has no attribute {name!r}")
+
+    _stub.__getattr__ = _sox_getattr
+    return _stub
 
 
 def _load_ref():
@@ -103,11 +130,17 @@ def _load():
         if _loading:
             return False
         if not os.path.isdir(_MODEL_DIR):
-            print(f"  [本地合成：模型不存在 {_MODEL_DIR}，请先下载]")
+            print(f"  [本地合成：模型不存在 {_MODEL_DIR}，请先下载]", flush=True)
             return False
         _loading = True
     try:
         import torch
+        # qwen_tts 的 25Hz 子模块（speech_vq.py）顶层 import sox（pysox）→ 每次启动
+        # 打印一整屏 "SoX could not be found!" 警告。12Hz 推理路径完全不用 sox
+        # （源码确认：仅 tokenizer_25hz 下 sox_norm 响度归一化才碰），import 期间用
+        # stub 顶替——杜绝刷屏；万一未来真走了 25Hz 路径，崩得明明白白（清晰报错）
+        if "sox" not in sys.modules:
+            sys.modules["sox"] = _make_sox_stub()
         from qwen_tts import Qwen3TTSModel
         _model = Qwen3TTSModel.from_pretrained(
             _MODEL_DIR,
@@ -121,13 +154,14 @@ def _load():
             _clone_prompt = _model.create_voice_clone_prompt(
                 ref_audio=audios, ref_text=texts,
             )
-            print(f"  [本地合成就绪：Qwen3-TTS 声音克隆（小李音色，{len(audios)} 段参考）]")
+            print(f"  [本地合成就绪：Qwen3-TTS 声音克隆（小李音色，{len(audios)} 段参考）]",
+                  flush=True)
         else:
-            print("  [本地合成就绪（缺参考音频/文本 → 无克隆，用默认音色）]")
+            print("  [本地合成就绪（缺参考音频/文本 → 无克隆，用默认音色）]", flush=True)
         return True
     except Exception as e:
         _model = None
-        print(f"  [本地合成模型加载失败：{e}]（自动用火山）")
+        print(f"  [本地合成模型加载失败：{e}]（自动用火山）", flush=True)
         return False
     finally:
         _loading = False
@@ -164,10 +198,11 @@ def synthesize(text):
             import torch
             peak = torch.cuda.max_memory_allocated() / 1e9
             now = torch.cuda.memory_allocated() / 1e9
-            print(f"  [本地合成OK {len(pcm)/(sr*2):.1f}s 显存当前{now:.1f}GB 峰值{peak:.1f}GB]")
+            print(f"  [本地合成OK {len(pcm)/(sr*2):.1f}s 显存当前{now:.1f}GB 峰值{peak:.1f}GB]",
+                  flush=True)
         except Exception:
-            print(f"  [本地合成OK {len(pcm)/(sr*2):.1f}s]")
+            print(f"  [本地合成OK {len(pcm)/(sr*2):.1f}s]", flush=True)
         return sr, pcm
     except Exception as e:
-        print(f"  [本地合成失败：{e}]（自动用火山）")
+        print(f"  [本地合成失败：{e}]（自动用火山）", flush=True)
         return None

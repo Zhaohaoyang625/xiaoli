@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 from datetime import datetime, timedelta
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # 项目根
 sys.stdout.reconfigure(encoding="utf-8")
@@ -139,6 +140,11 @@ print("#" * 56)
 
 print()
 print("【场景1】早上8点，她先开口（B.2 节奏窗口→主动回合）")
+# 前提归一（同场景 7.5 教训）：真实用户有昨晚的聊天记忆——先塞一条，
+# 主动回合"有值得说的"（全新空档案时 LLM 倾向选 SILENT——"少而真"设计
+# 本身合理，但 e2e 要测"链路会说话"，得给她一个说话的由头）
+memory_mod.merge_fact(facts, "昨晚睡前他说今天想看日出，让我早上叫他", importance=6)
+memory_mod.save_facts(facts)
 chat.handle_event("节奏", "现在是早安时间，你主动开口", "08:00")
 if len(diary["messages"]) < 1:
     # 她偶尔会选"安静陪着你"（v2 P3 显式静默，合法行为，LLM 随机）→ 再给一次机会
@@ -201,12 +207,17 @@ check("形象状态文件已更新", "text" in state and "mood" in state)
 
 print()
 print("【场景7.5】小脾气全链路：吃醋 → 真生气 → 哄 → 和好（B.1 + 程序触发检测）")
+# 前提归一：场景测的是"小脾气链路本身"，从干净状态开始（否则真实会话残留的
+# 气头会叠进来，intensity 从 86 起算 → 哄一次到 65 还酸着，断言 75-35=40 就不可复现）
+her_heart["mood"] = {"primary": "content", "intensity": 45, "causes": [], "secondary": None}
+her_heart["grudge"] = 0  # 怨气同步清零（否则真实会话残留的账会叠进本轮断言）
 user_turn("我们公司来了个新的女同事，长得很可爱耶")
 check("她吃醋了（心情变 jealous）", her_heart["mood"]["primary"] == "jealous")
 user_turn("那个女同事约我周末吃饭，我想想答应不答应")
 check("你还提 → 升级真生气（angry）", her_heart["mood"]["primary"] == "angry")
 user_turn("好啦别生气，我推掉啦，这周末都陪你，你最好了")
-check("哄一次降级（不再 angry，还酸着）", her_heart["mood"]["primary"] not in ("angry", "content"))
+check("哄一次就心软（75-35=40→content，2026-08-23 用户实测调整；85+ 才要两轮）",
+      her_heart["mood"]["primary"] == "content")
 user_turn("对不起嘛，我错啦，你才是最美的，抱抱～")
 check("哄到心软（content，和好）", her_heart["mood"]["primary"] == "content")
 
@@ -234,3 +245,13 @@ print()
 print("#" * 56)
 print(f"#  全部 {F} 项检查通过！小李完整链路实测完成")
 print("#" * 56)
+
+# AX. 提醒 SILENT 兜底（2026-08-23 漏洞修复回归）：LLM 偶发 SILENT 时提醒不能静音
+print()
+print("【场景10】提醒到点但 LLM 选安静 → 程序兜底说话（承诺必须兑现）")
+with mock.patch("xiaoli.chat.proactive_talk", return_value="SILENT"):
+    chat.handle_event("提醒", "你该吃药啦", "10:00")
+msgs = chat.diary["messages"]
+check("提醒 SILENT 兜底说话（程序顶上）",
+      len(msgs) and "吃药" in msgs[-1]["content"])
+print(f"  （她说：{msgs[-1]['content'][:30]}…）")

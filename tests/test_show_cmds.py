@@ -201,12 +201,18 @@ class TestFaceStateTokenSync(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._saved_file = chat_mod.FACE_STATE_FILE
         chat_mod.FACE_STATE_FILE = os.path.join(self._tmp.name, "face_state.js")
+        # 2026-08-29 实测教训：update_face 写两份（根 data/ + web/data/），
+        # 只重定向第一份 → 测试把真实 web/data/face_state.js 写成 abc123 →
+        # 网页 token 失配全 403（"点了没反应"）。两份都要进临时目录！
+        self._saved_web_file = chat_mod.WEB_FACE_STATE_FILE
+        chat_mod.WEB_FACE_STATE_FILE = os.path.join(self._tmp.name, "web_face_state.js")
         self._saved_heart = chat_mod.her_heart
         chat_mod.her_heart = {"mood": {"primary": "happy", "intensity": 60},
                               "affection": 80}
 
     def tearDown(self):
         chat_mod.FACE_STATE_FILE = self._saved_file
+        chat_mod.WEB_FACE_STATE_FILE = self._saved_web_file
         chat_mod.her_heart = self._saved_heart
         self._tmp.cleanup()
 

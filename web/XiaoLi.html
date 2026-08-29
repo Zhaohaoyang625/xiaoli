@@ -9,11 +9,13 @@
     background: linear-gradient(180deg, #ffe3ec 0%, #ffd6e0 60%, #ffc9d8 100%);
     font-family: "Microsoft JhengHei", "Segoe UI", sans-serif;
     display: flex; justify-content: center; align-items: center;
-    min-height: 100vh; overflow: hidden;
+    height: 100vh; overflow: hidden;
   }
-  .stage { text-align: center; width: 420px; }
-  .name { font-size: 34px; color: #d4487a; font-weight: bold; letter-spacing: 4px; }
-  .moodline { font-size: 16px; color: #b0456b; margin: 4px 0 14px; min-height: 22px; }
+  /* 2026-08-23 布局重做（用户实测"话多了就看不见了"）：整页一屏，对话区占满中间，
+     脸缩小让位（transform 缩放不破坏 Live2D 内部像素坐标系），聊天记录是主角 */
+  .stage { text-align: center; width: 480px; height: 100vh;
+    display: flex; flex-direction: column; padding: 8px 0 10px; }
+  .name { font-size: 26px; color: #d4487a; font-weight: bold; letter-spacing: 4px; }
   /* 表情演示大字标签（盖在形象上方，看清当前是什么表情） */
   .demo-tag { position: absolute; top: -6px; left: 50%; transform: translateX(-50%);
     background: rgba(255, 255, 255, 0.95); border: 2px solid #b0456b; border-radius: 20px;
@@ -21,11 +23,14 @@
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); white-space: nowrap; }
 
   /* ======= 脸 ======= */
+  /* 2026-08-23：transform 缩放（子元素全是 px 绝对定位，容器改小会溢出，缩放不动布局坐标） */
   .face {
     width: 260px; height: 260px; margin: 0 auto;
     background: #ffdfc4;
     border-radius: 50%;
     position: relative;
+    transform: scale(.74); transform-origin: top center;
+    margin-bottom: -68px;
     box-shadow: 0 12px 40px rgba(212, 72, 122, .25), inset 0 -8px 18px rgba(255, 190, 150, .5);
     animation: breathe 3.5s ease-in-out infinite;
   }
@@ -112,29 +117,23 @@
   .face.melancholy .mouth { border-top: 4px solid #8a3a2a; border-radius: 30px 30px 0 0; height: 12px; }
   .face.melancholy .blush { opacity: .3; }
 
-  /* ======= 面板 ======= */
-  .panel { margin-top: 18px; background: rgba(255, 255, 255, .75); border-radius: 18px;
-    padding: 14px 18px; box-shadow: 0 6px 24px rgba(212, 72, 122, .15); }
-  .bar { height: 10px; background: #f3d9e2; border-radius: 8px; overflow: hidden; }
-  .fill { height: 100%; width: 60%; background: linear-gradient(90deg, #ff9bb8, #d4487a);
-    border-radius: 8px; transition: width .8s; }
-  .loves { font-size: 12px; color: #a05c76; margin-top: 4px; }
-  .subtitle { margin-top: 10px; font-size: 17px; color: #7a3a55; min-height: 46px;
-    line-height: 1.5; }
+  /* ======= 面板（2026-08-23 精简：好感条/心情条删了，只要她实时说的话） ======= */
+  .panel { margin-top: 6px; background: rgba(255, 255, 255, .75); border-radius: 18px;
+    padding: 10px 16px; box-shadow: 0 6px 24px rgba(212, 72, 122, .15); }
+  .subtitle { margin-top: 4px; font-size: 15px; color: #7a3a55; min-height: 40px;
+    line-height: 1.45; }
   .cursor::after { content: "▍"; color: #d4487a; animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
-  .footer { margin-top: 8px; font-size: 12px; color: #c98aa3; }
 
   /* ======= 打字聊天 ======= */
-  .send-row { margin-top: 12px; display: flex; gap: 8px; }
+  .send-row { margin-top: 8px; display: flex; gap: 8px; }
   #sendInput { flex: 1; border: 1px solid #f0c2d3; border-radius: 18px; padding: 8px 14px;
     font-size: 14px; outline: none; color: #7a3a55; background: #fff; }
   #sendInput:focus { border-color: #d4487a; }
 
-  /* ======= 最近对话 ======= */
-  .chatlog { margin-top: 14px; background: rgba(255, 255, 255, .6); border-radius: 14px;
-    padding: 8px 10px; max-height: 210px; overflow-y: auto; text-align: left; }
-  .chatlog-title { font-size: 11px; color: #c98aa3; margin-bottom: 4px; }
+  /* ======= 最近对话（2026-08-23：主角区域，占满剩余高度，话再多也滚得动） ======= */
+  .chatlog { margin-top: 8px; background: rgba(255, 255, 255, .6); border-radius: 14px;
+    padding: 8px 10px; flex: 1; min-height: 90px; overflow-y: auto; text-align: left; }
   .msg { display: flex; margin: 5px 0; }
   .msg.user { justify-content: flex-end; }
   .msg.assistant { justify-content: flex-start; }
@@ -162,8 +161,19 @@
   @keyframes pulse { 50% { transform: scale(1.06); } }
   #talkStatus { margin-top: 8px; font-size: 13px; color: #a05c76; min-height: 18px; }
 
+  /* ======= ❤️ 她的心（2026-08-23 B-P2）：心情/好感/怨气 + 变迁史 ======= */
+  .heart-card { margin-top: 8px; background: rgba(255, 245, 250, .92); border: 1px solid #f0c2d3;
+    border-radius: 14px; padding: 10px 12px; font-size: 13px; color: #7a3a55; text-align: left; }
+  .heart-card .now { font-weight: bold; font-size: 14px; margin-bottom: 4px; }
+  .heart-card .cause { color: #a05c76; margin-bottom: 6px; }
+  .heart-card .log-title { color: #a05c76; margin: 6px 0 3px; }
+  .heart-card .log-item { color: #8a4a63; line-height: 1.5; }
+  .heart-card .log-item b { color: #d4487a; }
+
   /* ======= Live2D（v2 O1）：canvas 盖在 CSS 脸位置；依赖/加载失败 → 隐藏，CSS 脸照常 ======= */
-  #live2d-wrap { position: relative; width: 340px; height: 370px; margin: 0 auto; display: none; }
+  /* 2026-08-23：transform 缩小让位给对话区（canvas 内部 340x370 像素坐标系不动，表情参数不受影响） */
+  #live2d-wrap { position: relative; width: 340px; height: 370px; margin: 0 auto; display: none;
+    transform: scale(.62); transform-origin: top center; margin-bottom: -141px; }
   #live2d-canvas { position: absolute; inset: 0; }
   .face.hidden-live2d { display: none; }
 </style>
@@ -187,7 +197,6 @@
 <div id="l2d-status" style="position:fixed;right:8px;bottom:6px;max-width:46%;font-size:10px;color:#aaa;background:rgba(255,255,255,.7);padding:2px 8px;border-radius:6px;z-index:999;text-align:right;">Live2D 未启动</div>
 <div class="stage">
   <div class="name">小 李</div>
-  <div class="moodline" id="moodline">❤ 陪着你</div>
 
   <div class="face" id="face">
     <div class="blush l"></div><div class="blush r"></div>
@@ -201,23 +210,27 @@
   <div id="live2d-wrap"><canvas id="live2d-canvas"></canvas><div id="demo-tag" class="demo-tag" style="display:none"></div></div>
 
   <div class="panel">
-    <div class="bar"><div class="fill" id="fill"></div></div>
-    <div class="loves" id="loves">好感度：60 / 100</div>
     <div class="subtitle" id="subtitle">嗨～ 人家是小李，快来跟我聊天吧！</div>
     <div class="talk-row">
-      <button class="talkbtn" id="callBtn" title="免按键对话：麦克风常开，你直接说话她就回（她要你等她说完）">📞 通话：关</button>
+      <button class="talkbtn" id="callBtn" title="免按键对话：麦克风常开，你直接说话她就回（她说话时你插话她会停下来听）">📞 通话：关</button>
       <button class="talkbtn small" id="voiceBtn">🔊 出声：开</button>
+      <button class="talkbtn small" id="moreBtn" title="更多功能">⋯ 更多</button>
+    </div>
+    <!-- 更多功能（2026-08-23：收进折叠，主界面只留最常用的） -->
+    <div class="talk-row" id="moreRow" style="display:none">
       <button class="talkbtn small" id="proactiveBtn">💬 主动说话：开</button>
       <button class="talkbtn small" id="rememberBtn" title="把你刚说的这句话牢牢记下来（她不会忘）">📌 记住这句</button>
-      <button class="talkbtn small" id="faceDemoBtn" title="看她做各种表情（每2.5秒换一个，再点一次停止）">😊 看表情</button>
+      <button class="talkbtn small" id="faceDemoBtn" title="看她做各种表情（每3秒换一个，再点一次停止）">😊 看表情</button>
       <button class="talkbtn small" id="photoBtn" title="给她看张照片（自拍/猫猫/风景都行，她会像真人一样夸你/追问）">📷 传照片</button>
+      <button class="talkbtn small" id="heartBtn" title="她的心：心情/好感/为什么这样（打开后每5秒自动刷新）">❤️ 她的心</button>
       <input type="file" id="photoInput" accept="image/*" style="display:none">
     </div>
+    <!-- ❤️ 她的心（2026-08-23 B-P2）：网页端看她的状态和变迁史（终端「心情」的网页版） -->
+    <div class="heart-card" id="heartCard" style="display:none"></div>
     <div id="talkStatus"></div>
   </div>
-  <!-- 💬 最近对话（2026-08-23）：网页也能看到聊了啥，刷新不丢（数据在后端日记里） -->
+  <!-- 💬 最近对话（2026-08-23）：对话是主角，占满整页中间，话再多也滚得动 -->
   <div class="chatlog" id="chatlog">
-    <div class="chatlog-title">最近对话（每 2 秒刷新 · 悬停看时间）</div>
     <div id="chatlogBody"></div>
   </div>
   <!-- 💬 打字聊天（2026-08-23）：网页输入框，和终端聊天同一份日记 -->
@@ -225,7 +238,6 @@
     <input type="text" id="sendInput" placeholder="打字跟她说…（回车发送）" maxlength="200">
     <button class="talkbtn small" id="sendBtn">发送</button>
   </div>
-  <div class="footer">先运行 python -m xiaoli.chat --voice（或双击 start.bat），点📞开通话免按键直接说话</div>
 </div>
 
 <script>
@@ -262,15 +274,8 @@ function applyState(s) {
     // CSS 兜底脸也归主程序管（演示模式时由演示循环接管，防打架）
     document.getElementById("face").className = "face " + m.face;
   }
-  // 演示模式时 moodline 归演示循环管（否则每 1 秒轮询会把"表情演示：xx"冲掉，用户看不清）
-  if (!faceDemo) {
-    document.getElementById("moodline").textContent = m.text + (s.intensity ? " · 程度 " + s.intensity : "");
-    document.getElementById("moodline").style.color = m.color;
-    // 2026-08-23：浏览器标签页标题跟着她心情变（"小李 💗 开心"）
-    document.title = "小李 💗 " + m.text.replace(/^\S+\s*/, "");
-  }
-  document.getElementById("fill").style.width = s.affection + "%";
-  document.getElementById("loves").textContent = "好感度：" + s.affection + " / 100";
+  // 2026-08-23：浏览器标签页标题跟着她心情变（"小李 💗 开心"）
+  document.title = "小李 💗 " + m.text.replace(/^\S+\s*/, "");
   // 🔊 开关按钮跟随她的声音状态（Python 每次刷新会带上 voice）
   const vBtn = document.getElementById("voiceBtn");
   if (s.voice !== undefined) {
@@ -291,6 +296,12 @@ function applyState(s) {
   if (s.proactive !== undefined) {
     pBtn.textContent = "💬 主动说话：" + (s.proactive ? "开" : "关");
     pBtn.dataset.on = s.proactive ? "1" : "0";
+  }
+  // 📞 通话按钮跟随真实监听状态（2026-08-23 全面排查）：后端线程异常退出/卡死
+  // 重建时，这里会把按钮拉回"关"——不然显示"开"实际没监听，说话全无反应
+  const cBtn = document.getElementById("callBtn");
+  if (s.call_on !== undefined && !cBtn.disabled) {
+    cBtn.textContent = "📞 通话：" + (s.call_on ? "开" : "关");
   }
   const sub = document.getElementById("subtitle");
   if (s.text && s.text !== sub.dataset.last) {
@@ -351,7 +362,7 @@ document.getElementById("proactiveBtn").addEventListener("click", toggleProactiv
 document.getElementById("rememberBtn").addEventListener("click", () => {
   const btn = document.getElementById("rememberBtn");
   btn.textContent = "⏳ 记住中…";
-  fetch(BRIDGE + "/remember" + BRIDGE_TOKEN())
+  fetch(BRIDGE + "/remember?" + BRIDGE_TOKEN())
     .then(r => r.json())
     .then(d => {
       btn.textContent = d.ok ? "✅ 记住啦！" : "❌ 没记到";
@@ -375,7 +386,7 @@ document.getElementById("photoInput").addEventListener("change", () => {
   // 直接发裸文件字节（不包 FormData）——服务端按图片魔数校验，
   // 包 multipart 的话前 4 字节是 --bo 会被误判垃圾文件（实测 400）
   statusEl.textContent = "📷 她在看照片…";
-  fetch(BRIDGE + "/photo" + BRIDGE_TOKEN(), { method: "POST", body: f })
+  fetch(BRIDGE + "/photo?" + BRIDGE_TOKEN(), { method: "POST", body: f })
     .then(r => r.json())
     .then(d => {
       statusEl.textContent = d.ok ? "📷 她看到照片了！" : "📷 传送失败：" + (d.error || "未知错误");
@@ -385,7 +396,7 @@ document.getElementById("photoInput").addEventListener("change", () => {
 });
 
 // 页面加载时同步通话真实状态（可能终端那边已经开着通话）
-fetch(BRIDGE + "/call_mode" + BRIDGE_TOKEN())
+fetch(BRIDGE + "/call_mode?" + BRIDGE_TOKEN())
   .then(r => r.json())
   .then(d => {
     if (d.ok) {
@@ -414,6 +425,14 @@ document.getElementById("callBtn").addEventListener("click", () => {
       btn.textContent = "⚠️ 连不上";
       setTimeout(() => { btn.textContent = "📞 通话：关"; btn.disabled = false; }, 2000);
     });
+});
+
+// 2026-08-23：⋯ 更多 → 展开/收起次级功能（主动说话/记住/看表情/传照片）
+document.getElementById("moreBtn").addEventListener("click", function () {
+  const row = document.getElementById("moreRow");
+  const open = row.style.display !== "none";
+  row.style.display = open ? "none" : "flex";
+  this.textContent = open ? "⋯ 更多" : "⋯ 收起";
 });
 
 // ======= Live2D（v2 O1）：Shizuku 会动的小人（离线/加载失败 → CSS 脸兜底） =======
@@ -492,7 +511,10 @@ function initLive2D() {
     __l2dReport("PIXI.Application 建好");
     PIXI.live2d.Live2DModel.from(
       // 2026-08-22 本地化：模型下载到 web/live2d/shizuku/
-      "./live2d/shizuku/shizuku.model.json",
+      // 2026-08-23 修复：file:// 打开时 fetch 本地模型被浏览器禁止（Network error）
+      //   → 模型改走本机 WebBridge（127.0.0.1:8800）白名单静态服务加载；
+      //   桥没起/加载失败 → 下方 catch 兜底 CSS 脸，绝不影响聊天。
+      "http://127.0.0.1:8800/live2d/shizuku/shizuku.model.json",
       { autoInteract: false }
     ).then(model => {
       // 尺寸/位置：让她的脸落在原来 CSS 脸的区域
@@ -644,18 +666,15 @@ function toggleFaceDemo() {
     btn.textContent = "😊 看表情";
     tag.style.display = "none";
     window.__mood = "neutral";
-    document.getElementById("moodline").textContent = "❤ 陪着你";
     return;
   }
   let i = 0;
   window.__mood = FACE_DEMO_ORDER[0];
   btn.textContent = "⏹ 停止演示";
-  // 大字标签 + moodline 双显示（标签在形象上方，永远看得清；文字 = 官方表情实际效果）
+  // 大字标签显示当前表情（标签在形象上方，永远看得清）
   const show = () => {
     const m = FACE_DEMO_ORDER[i];
     tag.textContent = "😊 " + (EXPR_TEXT[m] || m);
-    document.getElementById("moodline").textContent =
-      "官方表情演示：" + (EXPR_TEXT[m] || m) + "（每 3 秒换一个）";
     // CSS 兜底脸也跟随演示（模型加载失败时她就是 CSS 脸——两个来源必须同步）
     document.getElementById("face").className = "face " + (EXPR_FACE_CLASS[m] || "neutral");
   };
@@ -728,6 +747,44 @@ function sendText() {
 }
 document.getElementById("sendBtn").addEventListener("click", sendText);
 sendInput.addEventListener("keydown", e => { if (e.key === "Enter") sendText(); });
+
+// ======= ❤️ 她的心（2026-08-23 B-P2）：网页端看她的状态和变迁史 =======
+// 打开后每 5 秒刷新（心情/好感/怨气/原因/最近变迁），再点收起
+const heartCard = document.getElementById("heartCard");
+let heartOpen = false, heartTimer = null;
+function loadHeart() {
+  fetch(BRIDGE + "/heart?" + BRIDGE_TOKEN())
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) return;
+      const m = MOODS[d.mood] || { text: d.mood, color: "#a0a0a0" };
+      const causes = (d.causes || []).map(escHtml).join("；") || "没有特别的原因";
+      const grudge = d.grudge > 0 ? "｜怨气 " + d.grudge + (d.grudge >= 50 ? "（记着仇呢…）" : "（有点小疙瘩）") : "";
+      let logHtml = "";
+      if (d.log && d.log.length) {
+        const rows = d.log.slice().reverse().map(e => {
+          const em = MOODS[e.mood] || { text: e.mood };
+          return '<div class="log-item">' + escHtml(e.t) + " " + em.text +
+            "（程度" + e.i + "）怨气" + e.g + "｜" + escHtml(e.c || "") + "</div>";
+        }).join("");
+        logHtml = '<div class="log-title">── 心情变迁（新→旧）──</div>' + rows;
+      }
+      heartCard.innerHTML =
+        '<div class="now">❤️ ' + m.text + "（程度" + d.intensity + "）｜好感 " + d.affection + grudge + "</div>" +
+        '<div class="cause">因为：' + causes + "</div>" + logHtml;
+    })
+    .catch(() => { heartCard.innerHTML = '<div class="now">⚠️ 连不上本地桥</div>'; });
+}
+document.getElementById("heartBtn").addEventListener("click", () => {
+  heartOpen = !heartOpen;
+  heartCard.style.display = heartOpen ? "block" : "none";
+  if (heartOpen) {
+    loadHeart();
+    heartTimer = setInterval(loadHeart, 5000);
+  } else {
+    clearInterval(heartTimer);
+  }
+});
 </script>
 </body>
 </html>
